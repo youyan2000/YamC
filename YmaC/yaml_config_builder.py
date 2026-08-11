@@ -258,7 +258,7 @@ def inject_config(target_file: Path, rendered: str, config_id: str) -> bool:
         f"{indent}{END_MARKER}"
     )
 
-    updated = original[:begin_idx] + new_block + original[end_idx + len(END_MARKER):]
+    updated = original[:line_start] + new_block + original[end_idx + len(END_MARKER):]
     try:
         target_file.write_text(updated, encoding="utf-8")
         return True
