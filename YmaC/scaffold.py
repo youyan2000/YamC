@@ -38,6 +38,9 @@ LAYER_DIRS = {
 # 层拓扑顺序：BSP → Components → Devices → Module → App
 LAYER_ORDER = ["BSP", "Components", "Devices", "Module", "App"]
 
+# 上下文归位（三件事 → 三上下文，见 docs/debug/rt-execution-design.md）
+CTX_VALUES = ("fast", "slow", "main")
+
 # 扫描 MANIFEST 的层目录（顺序即扫描顺序，保证输出稳定）
 _SCAN_DIRS = ["BSP", "Components", "Devices", "Module", "App"]
 
@@ -69,6 +72,7 @@ class Manifest:
     self.files = [str(f).strip() for f in _as_list(raw.get("files")) if str(f).strip()]
     self.depends = [str(d).strip() for d in _as_list(raw.get("depends")) if str(d).strip()]
     self.constructors = [str(c).strip() for c in _as_list(raw.get("constructors")) if str(c).strip()]
+    self.ctx = str(raw.get("ctx", "")).strip().lower()  # fast|slow|main (运行时 AI 填, 工具链校验)
 
   def rel_dir(self, root):
     """子系统目录相对仓库根的 posix 路径，如 Components/pid。"""
@@ -265,6 +269,10 @@ def cmd_scan(root):
       errors.append(f"[{m.id}] 缺少 layer 字段")
     elif m.layer not in LAYER_ORDER:
       errors.append(f"[{m.id}] 非法 layer: '{m.layer}'")
+    if m.ctx and m.ctx not in CTX_VALUES:
+      errors.append(f"[{m.id}] 非法 ctx: '{m.ctx}' (期望 {', '.join(CTX_VALUES)})")
+    elif m.layer == "Module" and not m.ctx:
+      warnings.append(f"[{m.id}] Module 缺 ctx 字段 (fast|slow|main, 三上下文归位)")
     head = m.id.split("/")[0].lower()
     if head not in LAYER_DIRS:
       errors.append(f"[{m.id}] id 前缀非法: '{head}'")
@@ -298,6 +306,8 @@ def cmd_scan(root):
       print("  depends: " + ", ".join(m.depends))
     if m.constructors:
       print("  constructors: " + ", ".join(m.constructors))
+    if m.ctx:
+      print("  ctx: " + m.ctx)
   for w in warnings:
     print(f"警告: {w}")
 
