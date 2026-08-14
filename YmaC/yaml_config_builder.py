@@ -464,12 +464,14 @@ def _build_gui() -> int:
     """构建并运行 GUI。PyQt6 在此函数内按需导入。"""
     # ── 延迟导入 PyQt6 ──────────────────────────────────────
     try:
-        from PyQt6.QtCore import QProcess, Qt, QTimer
+        from PyQt6.QtCore import QProcess, Qt, QThread, QTimer, pyqtSignal
         from PyQt6.QtGui import QColor, QFont, QPalette
         from PyQt6.QtWidgets import (
             QApplication,
+            QCheckBox,
             QComboBox,
             QDoubleSpinBox,
+            QFileDialog,
             QFormLayout,
             QGroupBox,
             QHBoxLayout,
@@ -509,6 +511,11 @@ def _build_gui() -> int:
     _ymac_dir = str(Path(__file__).resolve().parent)
     if _ymac_dir not in sys.path:
         sys.path.insert(0, _ymac_dir)
+
+    # 共享接入流水线 (CLI 同源) + 外部工程探测
+    from engine import _LEVEL_TAG, run_pipeline
+    from project_probe import detect_platform as _probe_platform
+    from project_probe import find_project_root as _probe_root
 
     # ── 暗色主题工具 ────────────────────────────────────────
 
@@ -609,6 +616,30 @@ def _build_gui() -> int:
 
     # ── 主窗口类 ────────────────────────────────────────────
 
+    class _EngineRunThread(QThread):
+        """engine.run_pipeline 后台线程: 日志逐行发射 + 完成信号.
+
+        git/submodule/构建等慢操作不阻塞 UI; line 信号接窗口级日志框."""
+        line = pyqtSignal(str)
+        done = pyqtSignal(bool, str)
+
+        def __init__(self, start: Path, topology: str, params: Optional[dict],
+                     opts: dict) -> None:
+            super().__init__()
+            self._start = start
+            self._topology = topology
+            self._params = params
+            self._opts = opts
+
+        def run(self) -> None:
+            res = run_pipeline(
+                self._start, self._topology, self._params, self._opts,
+                log=lambda level, msg: self.line.emit(f"[{_LEVEL_TAG.get(level, level.upper())}] {msg}"),
+            )
+            ok = bool(res.get("ok"))
+            reason = res.get("reason") or "完成 — app_main.c/h + CMake 接入就绪"
+            self.done.emit(ok, reason)
+
     class _ConfigBuilderWindow(QMainWindow):
         """YAML Config Builder 主窗口。"""
 
@@ -617,6 +648,7 @@ def _build_gui() -> int:
         _current_id: Optional[str]
         _build_info: Optional[dict]
         _build_process: Optional[QProcess]
+        _engine_thread: Optional[QThread]
 
         def __init__(self) -> None:
             super().__init__()
@@ -626,6 +658,7 @@ def _build_gui() -> int:
             self._build_info = None
             self._build_process = None
             self._build_active_btn = None
+            self._engine_thread = None
             self._topologies = []
             self._current_topo = None
             self._param_spinboxes = {}
@@ -869,6 +902,46 @@ def _build_gui() -> int:
             btn_row.addWidget(self._btn_topo_build)
             btn_row.addStretch()
             layout.addLayout(btn_row)
+
+            # ── 外部工程接入 (ymac_cfg 完整流水线, 与 CLI 同源 engine) ──
+            ext_group = QGroupBox("外部工程接入（ymac_cfg 完整流水线 → 真实 CubeMX 工程）")
+            ext_inner = QVBoxLayout(ext_group)
+            ext_inner.setContentsMargins(8, 12, 8, 8)
+            ext_inner.setSpacing(6)
+
+            ext_row = QHBoxLayout()
+            ext_row.addWidget(QLabel("工程根:"))
+            self._edit_ext_root = QLineEdit()
+            self._edit_ext_root.setPlaceholderText("外部工程根（含 .ioc），如 D:/proj/my_psu")
+            ext_row.addWidget(self._edit_ext_root, stretch=1)
+            self._btn_ext_browse = QPushButton("浏览…")
+            self._btn_ext_browse.setObjectName("btn_secondary")
+            self._btn_ext_browse.clicked.connect(self._on_ext_browse)
+            ext_row.addWidget(self._btn_ext_browse)
+            self._btn_ext_probe = QPushButton("探测")
+            self._btn_ext_probe.setObjectName("btn_secondary")
+            self._btn_ext_probe.clicked.connect(self._on_ext_probe)
+            ext_row.addWidget(self._btn_ext_probe)
+            ext_inner.addLayout(ext_row)
+
+            self._lbl_ext_probe = QLabel("未探测")
+            self._lbl_ext_probe.setStyleSheet("color: #888; font-size: 12px;")
+            ext_inner.addWidget(self._lbl_ext_probe)
+
+            opt_row = QHBoxLayout()
+            self._chk_ext_no_build = QCheckBox("跳过编译")
+            self._chk_ext_no_sub = QCheckBox("跳过 submodule (adopt 已有目录)")
+            self._chk_ext_no_sub.setChecked(True)
+            opt_row.addWidget(self._chk_ext_no_build)
+            opt_row.addWidget(self._chk_ext_no_sub)
+            opt_row.addStretch()
+            ext_inner.addLayout(opt_row)
+
+            self._btn_ext_run = QPushButton("▶ 运行完整接入")
+            self._btn_ext_run.clicked.connect(self._on_ext_run)
+            ext_inner.addWidget(self._btn_ext_run)
+
+            layout.addWidget(ext_group)
 
             widget.setLayout(layout)
             self._tabs.addTab(widget, "拓扑选择")
@@ -1456,6 +1529,59 @@ def _build_gui() -> int:
                 cmd = [cmake_path, "--build", str(build_dir)]
             self._launch_build(cmd, str(gen_dir), self._btn_topo_build)
 
+        # ── 外部工程接入 (engine 后台线程) ───────────────────
+
+        def _on_ext_browse(self) -> None:
+            start = self._edit_ext_root.text().strip() or str(Path.home())
+            d = QFileDialog.getExistingDirectory(self, "选择外部工程根", start)
+            if d:
+                self._edit_ext_root.setText(d)
+                self._on_ext_probe()
+
+        def _on_ext_probe(self) -> None:
+            text = self._edit_ext_root.text().strip()
+            if not text:
+                self._lbl_ext_probe.setText("未探测")
+                return
+            root = _probe_root(Path(text))
+            if root is None:
+                self._lbl_ext_probe.setText(f"⚠ 未找到工程根（{text} 向上无 .ioc/.syscfg）")
+                return
+            plat = _probe_platform(root)
+            self._lbl_ext_probe.setText(f"工程根: {root}  |  平台: {plat}")
+
+        def _on_ext_run(self) -> None:
+            text = self._edit_ext_root.text().strip()
+            if not text:
+                QMessageBox.warning(self, "未选工程根", "请先填写或浏览外部工程根。")
+                return
+            if self._current_topo is None:
+                QMessageBox.warning(self, "未选择拓扑", "请先在左侧选择拓扑。")
+                return
+            if self._engine_thread is not None and self._engine_thread.isRunning():
+                QMessageBox.information(self, "正在运行", "流水线执行中，请稍候。")
+                return
+            topo_name = str(self._current_topo.get("name") or "buck")
+            params = self._build_config_from_form()  # {"power": {...}} → engine 归一化平铺
+            opts = {
+                "no_submodule": self._chk_ext_no_sub.isChecked(),
+                "no_build": self._chk_ext_no_build.isChecked(),
+            }
+            self._btn_ext_run.setEnabled(False)
+            self._log_msg(f"──────────────── 外部工程接入开始: {topo_name} → {text} ────────────────")
+            self._engine_thread = _EngineRunThread(Path(text), topo_name, params, opts)
+            self._engine_thread.line.connect(self._log_msg)
+            self._engine_thread.done.connect(self._on_ext_done)
+            self._engine_thread.start()
+
+        def _on_ext_done(self, ok: bool, reason: str) -> None:
+            self._btn_ext_run.setEnabled(True)
+            # 流水线已把最终 [Pass]/[FAIL] 行写入日志, 这里只弹结果框避免重复
+            if ok:
+                QMessageBox.information(self, "接入完成", reason)
+            else:
+                QMessageBox.critical(self, "接入失败", reason)
+
         # ── Tab3 运行时调参 ───────────────────────────────
 
         def _on_refresh_ports(self) -> None:
@@ -1719,7 +1845,7 @@ def _build_gui() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("YAML Config Builder")
-    app.setOrganizationName("WEILAI_SuperCap")
+    app.setOrganizationName("C-OOP")
     _apply_dark(app)
 
     window = _ConfigBuilderWindow()

@@ -26,7 +26,7 @@ from typing import Optional
 
 import yaml
 
-from engine import run_pipeline
+from engine import _flatten_dict, run_pipeline
 
 
 def _info(msg: str) -> None:
@@ -52,25 +52,21 @@ def _log(level: str, msg: str) -> None:
     _PRINTERS.get(level, _info)(msg)
 
 
-def _flatten_dict(d: dict, prefix: str = "") -> dict:
-    """{'pid_v': {'kp': 2}} → {'pid_v.kp': 2} (叶为标量)."""
-    out: dict = {}
-    for k, v in d.items():
-        key = f"{prefix}.{k}" if prefix else str(k)
-        if isinstance(v, dict):
-            out.update(_flatten_dict(v, key))
-        else:
-            out[key] = v
-    return out
-
-
 def load_params(path: Optional[Path]) -> Optional[dict]:
-    """--params YAML: 平铺 {'vref': 12.5, 'pid_v.kp': 2} 或 config: {power: {...}}."""
+    """--params YAML: 平铺 {'vref': 12.5, 'pid_v.kp': 2} 或 config: {power: {...}}.
+
+    坏路径/坏格式抛 ValueError (main 转 [FAIL] + exit 1), 与 exit 契约
+    '0=全部 Pass' 一致 — 用户显式给的 --params 读不了就是失败, 不能静默跑默认值."""
     if not path:
         return None
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except OSError:
+        raise ValueError(f"无法读取 --params: {path}")
+    except yaml.YAMLError as exc:
+        raise ValueError(f"--params YAML 格式错误: {exc}")
     if not isinstance(data, dict):
-        return None
+        raise ValueError(f"--params 顶层应为 dict: {path}")
     if "config" in data:
         power = data["config"].get("power") or {}
         if isinstance(power, dict):
@@ -87,9 +83,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--no-submodule", action="store_true", help="adopt 已有 C-OOP 目录, 不做 submodule")
     ap.add_argument("--no-build", action="store_true", help="跳过构建")
     ap.add_argument("--params", default=None, help="参数 YAML (平铺或 config: {power: {...}})")
+    ap.add_argument("--sdk-dir", default=None, help="c2000: C2000Ware/DigitalPower SDK 根 (缺省自动探测)")
     args = ap.parse_args(argv)
 
-    params = load_params(Path(args.params)) if args.params else None
+    try:
+        params = load_params(Path(args.params)) if args.params else None
+    except ValueError as exc:
+        _fail(str(exc))
+        return 1
+
     res = run_pipeline(
         Path(args.dir),
         args.topology,
@@ -99,6 +101,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "coop_path": Path(args.coop_path) if args.coop_path else None,
             "git_source": args.git_source,
             "no_build": args.no_build,
+            "sdk_dir": args.sdk_dir,
         },
         log=_log,
     )

@@ -86,6 +86,8 @@ def render_power_config(topo: dict, params: Optional[dict] = None) -> tuple[str,
 
 def gen_bsp_block(topo: dict, periph: dict) -> str:
     """拓扑 + periph → /* YMAC BSP */ 块 (每行无缩进, 由注入器补)."""
+    if periph.get("platform") == "c2000":
+        return gen_bsp_block_c2000(topo, periph)
     lines: list[str] = []
     lines.append("// ===== YmaC 生成: BSP/外设绑定 (拓扑 + .ioc) ====")
     pwm_cfg = topo.get("pwm") or {}
@@ -183,6 +185,95 @@ _PWM_DEVICE_GEN = {
 }
 
 
+# ======== BSP 绑定块生成 (C2000 分支, driverlib) ========
+
+def gen_bsp_block_c2000(topo: dict, periph: dict) -> str:
+    """C2000: 拓扑 + periph → /* YMAC BSP */ 块.
+
+    与 STM32 分支差异: 无 HAL 句柄对象 (基址宏直接作 void* 句柄), 无 DMA
+    (ePWM 触发单转换源), 时钟来自 c2000_syscfg 的 mcu.sysclk_hz.
+    """
+    lines: list[str] = []
+    lines.append("// ===== YmaC 生成: BSP/外设绑定 (拓扑 + main.syscfg, C2000 driverlib) ====")
+    pwm_cfg = topo.get("pwm") or {}
+    if pwm_cfg.get("device") != "pwm_buckboost":
+        lines.append(f"// WARN: C2000 分支仅支持 pwm_buckboost, 跳过 {pwm_cfg.get('device')}")
+    else:
+        lines.extend(_gen_pwm_c2000(pwm_cfg, periph))
+    adc_cfg = topo.get("adc") or {}
+    lines.extend(_gen_adc_c2000(adc_cfg, periph))
+    return "\n".join(lines)
+
+
+def _gen_pwm_c2000(pwm_cfg: dict, periph: dict) -> list[str]:
+    freq = int(pwm_cfg.get("freq_hz", 100000))
+    deadtime = int(pwm_cfg.get("deadtime_ns", 0))
+    sync_rect = bool(pwm_cfg.get("sync_rect", False))
+    ch_drive = int(pwm_cfg.get("ch_drive", 0))
+    mode = str(pwm_cfg.get("mode", "Buck"))
+    sysclk = int((periph.get("mcu") or {}).get("sysclk_hz") or 0)
+    if not sysclk:
+        return ["// WARN: c2000_syscfg 无 SYSCLK (sysclk_hz) — 未生成 PWM 绑定"]
+
+    # topo pwm.ch_drive → BSP_TIMER_A..F → 在 syscfg ePWM 实例中找同字母 timer
+    letter = chr(ord("A") + min(max(ch_drive, 0), 5))
+    epwms = (periph.get("peripherals") or {}).get("epwm") or []
+    match = next((e for e in epwms if e.get("timer") == letter), None)
+    if not match:
+        return [f"// WARN: syscfg 无 ePWM 绑到 BSP_TIMER_{letter} — 未生成 PWM 绑定"
+                f" (检查 topo pwm.ch_drive={ch_drive} 与工程 ePWM 实例对齐)"]
+
+    timer_enum = f"BSP_TIMER_{letter}"
+    out_mask = f"BSP_OUT_TIMER_{letter}_PAIR" if sync_rect else f"BSP_OUT_T{letter}1"
+    return [
+        f"// {match['instance']} ({match['base']}) — {freq} Hz {mode} "
+        f"(sync_rect={str(sync_rect).lower()}, 输出 {out_mask})",
+        f"pwm_bb_init(&g_root.drv_buck_pwm, {freq}u, {timer_enum}, {out_mask},",
+        f"            PwmMode_{mode}, /*sync_rect=*/{str(sync_rect).lower()});",
+        # pwm_bb_init 清零 bsp_cfg (含 clk_hz) → 后填时钟再重算 period/deadtime (同 STM32 分支)
+        f"g_root.drv_buck_pwm.bsp_cfg.handle = 0;  // C2000 无句柄对象, 模块基址由 timer 枚举推导 (bsp_c2000_epwm)",
+        f"g_root.drv_buck_pwm.bsp_cfg.clk_hz = {sysclk}u;  // SYSCLK (clocktree.h)",
+        # pwm_bb_init 内 bsp_init 缓存 s_epwm_clk_hz 时 clk_hz 仍为 0 → 必须重调 bsp_init 重新注入时钟,
+        # 否则死区换算 db_tick_from_ns (s_epwm_clk_hz==0 → 0 tick) 全零 → 互补管无死区 → 直通风险.
+        # (set_freq 走 bsp_cfg.clk_hz 直接算 period, 不受此缓存影响; 仅死区路径依赖缓存)
+        f"bsp_init(&g_root.drv_buck_pwm.bsp_cfg);  // 重注入 SYSCLK (缓存 s_epwm_clk_hz, 见 bsp_c2000_epwm.c)",
+        f"pwm_bb_set_freq(&g_root.drv_buck_pwm, {freq}u);",
+        f"pwm_bb_set_deadtime(&g_root.drv_buck_pwm, {deadtime}u);",
+        f"// 接线: {match['instance']} ISR (ADC 触发链) 调 App_OnControlTick()",
+    ]
+
+
+def _gen_adc_c2000(adc_cfg: dict, periph: dict) -> list[str]:
+    roles = adc_cfg.get("roles") or {}
+    if not roles:
+        return []
+    adcs = (periph.get("peripherals") or {}).get("adc") or []
+    if not adcs:
+        return ["// WARN: syscfg 无 ADC — 未生成采样绑定"]
+    adc = adcs[0]  # 单 ADC 假设; 多 ADC 需 roles.adc 指定, 现支持 syscfg 首实例
+
+    max_rank = max(r["ch"] for r in roles.values())
+    num_ch = max_rank + 1
+
+    gains = [1.0] * num_ch
+    role_at: dict = {}
+    for role, rcfg in roles.items():
+        gains[rcfg["ch"]] = float(rcfg.get("gain", 1.0))
+        role_at[rcfg["ch"]] = role
+
+    k_str = ", ".join(f"{g:.4f}f" for g in gains)
+    lines = [
+        f"// ADC {adc['instance']} ({adc['base']}) — {num_ch} 通道, ePWM 触发 (单转换源, 每控制周期一次 SOC)",
+        f"adc_dc_sampler_init(&g_root.drv_dc_adc, (void*){adc['base']}, NULL, {num_ch},",
+        f"                    (float[]){{{k_str}}}, NULL, NULL);",
+    ]
+    for rank in range(num_ch):
+        role = role_at.get(rank, "")
+        role_comment = f" — {role}" if role else ""
+        lines.append(f"//   CH{rank} = {adc['instance']}IN{rank}{role_comment}  // SOC 序由 SysConfig ADC 触发配置决定")
+    return lines
+
+
 # ======== 物化 + 注入 ========
 
 def _inject_main_h(text: str) -> str:
@@ -196,6 +287,21 @@ def _inject_main_h(text: str) -> str:
             out.append('#include "main.h"  // CubeMX HAL 类型 + 宏 (句柄在 main.c, 见下 extern)\n')
             inserted = True
     return "".join(out)
+
+
+def _inject_driverlib_h(text: str) -> str:
+    """C2000: 在文件最前插入 #include "driverlib.h".
+
+    TI 约定: driverlib.h 必须是第一个 include — C28x 字寻址, CGT <stdint.h> 不定义
+    uint8_t, 它只来自 hw_types.h 的 `typedef uint16_t uint8_t`; 若在 app_main.h
+    之后引入, 所有 C-OOP 头的 uint8_t 使用会先报未定义再冲突.
+    """
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip().startswith('#include'):
+            lines.insert(i, '#include "driverlib.h"  // C2000: 必须先于 app_main.h (uint8_t=uint16_t, 见 hw_types.h)\n')
+            break
+    return "".join(lines)
 
 
 # 外设实例前缀 → HAL 句柄类型 (CubeMX 在 main.c 定义全局句柄, 不导出到 main.h)
@@ -280,10 +386,13 @@ def gen_app(topo: dict, periph: dict, params: Optional[dict],
     tmpl_c = coop_dir / "App" / "app_main.c.tmpl"
     tmpl_h = coop_dir / "App" / "app_main.h.tmpl"
 
-    # app_main.c: 物化 → #include "main.h" → HAL 句柄 extern (CubeMX 不导出句柄)
+    # app_main.c: 物化 → 平台头注入 (STM32: main.h + HAL 句柄 extern; C2000: driverlib.h)
     text = tmpl_c.read_text(encoding="utf-8")
-    text = _inject_main_h(text)
-    text = _inject_handle_externs(text, _collect_handles(periph))
+    if periph.get("platform") == "c2000":
+        text = _inject_driverlib_h(text)
+    else:
+        text = _inject_main_h(text)
+        text = _inject_handle_externs(text, _collect_handles(periph))
     out_dir.mkdir(parents=True, exist_ok=True)
     out_c.write_text(text, encoding="utf-8")
 
@@ -300,19 +409,25 @@ def gen_app(topo: dict, periph: dict, params: Optional[dict],
 
 
 if __name__ == "__main__":
-    # 诊断: 加载 buck.yaml + software.ioc → 打印生成块
+    # 诊断: 加载 buck.yaml + 工程外设 (.ioc → STM32 / main.syscfg → C2000) → 打印生成块
     import tempfile
 
-    from ioc_parse import load_or_parse, cache_path_for
     from project_probe import find_ioc
 
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
     coop = Path(sys.argv[2] if len(sys.argv) > 2 else ".")
     ioc = find_ioc(root)
-    if not ioc:
-        print(f"[FAIL] 未找到 .ioc: {root}", file=sys.stderr)
+    if ioc:
+        from ioc_parse import load_or_parse, cache_path_for
+        periph = load_or_parse(ioc, cache_path_for(root, ioc))
+        print(f"[stm32] periph platform={periph.get('platform')} ({ioc})")
+    elif (root / "main.syscfg").is_file():
+        from c2000_syscfg import extract_peripherals
+        periph = extract_peripherals(root)
+        print(f"[c2000] periph platform={periph.get('platform')} ({root / 'main.syscfg'})")
+    else:
+        print(f"[FAIL] 未找到 .ioc 或 main.syscfg: {root}", file=sys.stderr)
         sys.exit(1)
-    periph = load_or_parse(ioc, cache_path_for(root, ioc))
     topo = load_topology(coop, "buck")
     print("==== BSP 绑定块 ====")
     print(gen_bsp_block(topo, periph))

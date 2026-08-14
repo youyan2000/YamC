@@ -12,6 +12,7 @@
   set(C_OOP_DRIVER st)                 # st | c2000 | none
   set(C_OOP_DEVICES "Devices/pwm/pwm_buckboost.c;Devices/adc/adc_dc_sampler.c")
   set(C_OOP_STM32_SERIES F3)           # 仅 st
+  set(C2000_SDK_DIR "...")             # 仅 c2000: C2000Ware/DigitalPower SDK 根
   include(${C_OOP_DIR}/cmake/C-OOP.CMake)
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE User/Application/app_main.c)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE coop)
@@ -64,7 +65,8 @@ def series_from_family(family: str) -> str:
 
 
 def _build_block(coop_rel: str, driver: str, devices: list[str],
-                 app_rel: str, series: Optional[str] = None) -> str:
+                 app_rel: str, series: Optional[str] = None,
+                 sdk_dir: Optional[str] = None) -> str:
     lines = [
         "set(C_OOP_DIR  " + coop_rel + ")",
         f"set(C_OOP_DRIVER {driver})",
@@ -72,6 +74,9 @@ def _build_block(coop_rel: str, driver: str, devices: list[str],
     ]
     if driver == "st" and series:
         lines.append(f"set(C_OOP_STM32_SERIES {series})")
+    if driver == "c2000" and sdk_dir:
+        # 正斜杠 + 引号: Windows 反斜杠会触发 CMake 转义, 路径含空格需引号包裹
+        lines.append(f'set(C2000_SDK_DIR "{sdk_dir.replace(chr(92), "/")}")')
     lines.append("include(${C_OOP_DIR}/cmake/C-OOP.CMake)")
     lines.append(f"target_sources(${{CMAKE_PROJECT_NAME}} PRIVATE {app_rel})")
     lines.append("target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE coop)")
@@ -106,15 +111,17 @@ def read_text_with_fallback(path: str) -> str:
 
 def inject_cmake_integration(cm_path: Path, coop_rel: str, driver: str,
                              devices: list[str], app_rel: str,
-                             series: Optional[str] = None) -> dict:
+                             series: Optional[str] = None,
+                             sdk_dir: Optional[str] = None) -> dict:
     """往 CMakeLists.txt 幂等注入 C-OOP 接入块.
 
+    series: 仅 st (C_OOP_STM32_SERIES); sdk_dir: 仅 c2000 (C2000_SDK_DIR).
     返回 {updated: bool, inserted: bool, old_integration: bool}.
     """
     text = read_text_with_fallback(str(cm_path)) if cm_path.is_file() else ""
     old_integration = _has_old_integration(text)
 
-    block = _build_block(coop_rel, driver, devices, app_rel, series)
+    block = _build_block(coop_rel, driver, devices, app_rel, series, sdk_dir)
     wrapped = f"{BEGIN_MARKER}\n{block}\n{END_MARKER}"
 
     begin_idx = text.find(BEGIN_MARKER)

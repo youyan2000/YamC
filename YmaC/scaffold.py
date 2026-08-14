@@ -38,7 +38,7 @@ LAYER_DIRS = {
 # 层拓扑顺序：BSP → Components → Devices → Module → App
 LAYER_ORDER = ["BSP", "Components", "Devices", "Module", "App"]
 
-# 上下文归位（三件事 → 三上下文，见 docs/debug/rt-execution-design.md）
+# 上下文归位（三件事 → 三上下文）
 CTX_VALUES = ("fast", "slow", "main")
 
 # 扫描 MANIFEST 的层目录（顺序即扫描顺序，保证输出稳定）
