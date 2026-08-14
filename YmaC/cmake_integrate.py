@@ -1,21 +1,21 @@
-"""ymac_cfg — 外部工程 CMakeLists.txt 幂等接入 C-OOP.CMake.
+"""ymac_cfg — 外部工程 CMakeLists.txt 幂等接入 HardC.CMake.
 
 对标 xr_cubemx_cfg 的构建集成: 往外部工程 CMakeLists.txt 注入一个
-`YmaC C-OOP BEGIN/END` 块 (set C_OOP_* 变量 + include + target_sources + link),
+`YmaC HardC BEGIN/END` 块 (set HARDC_* 变量 + include + target_sources + link),
 删除旧块重跑即可重建; 不改动 CubeMX 保护区.
 
-注入位置: 首个 add_subdirectory 之后 (C-OOP.CMake 需 stm32cubemx 目标已定义),
+注入位置: 首个 add_subdirectory 之后 (HardC.CMake 需 stm32cubemx 目标已定义),
 退化: add_executable 之后 → 文件末尾.
 
 块内容:
-  set(C_OOP_DIR  Middlewares/Third_Party/C-OOP)
-  set(C_OOP_DRIVER st)                 # st | c2000 | none
-  set(C_OOP_DEVICES "Devices/pwm/pwm_buckboost.c;Devices/adc/adc_dc_sampler.c")
-  set(C_OOP_STM32_SERIES F3)           # 仅 st
+  set(HARDC_DIR  Middlewares/Third_Party/HardC)
+  set(HARDC_DRIVER st)                 # st | c2000 | none
+  set(HARDC_DEVICES "Devices/pwm/pwm_buckboost.c;Devices/adc/adc_dc_sampler.c")
+  set(HARDC_STM32_SERIES F3)           # 仅 st
   set(C2000_SDK_DIR "...")             # 仅 c2000: C2000Ware/DigitalPower SDK 根
-  include(${C_OOP_DIR}/cmake/C-OOP.CMake)
+  include(${HARDC_DIR}/cmake/HardC.CMake)
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE User/Application/app_main.c)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE coop)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE hardc)
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-BEGIN_MARKER = "# ====== YmaC C-OOP BEGIN (ymac_cfg 生成, 勿手改) ======"
-END_MARKER = "# ====== YmaC C-OOP END ======"
+BEGIN_MARKER = "# ====== YmaC HardC BEGIN (ymac_cfg 生成, 勿手改) ======"
+END_MARKER = "# ====== YmaC HardC END ======"
 
 # 旧版手工集成 (User/Components... 平铺) 的检测特征
 _OLD_USER_PATTERN = re.compile(r"User/(Components|Devices|Module)/")
@@ -44,9 +44,9 @@ def _has_old_integration(text: str) -> bool:
 
 
 def compute_devices(topo: dict) -> list[str]:
-    """拓扑 pwm/adc 段 → C-OOP Devices 闭包 (相对 C-OOP 根).
+    """拓扑 pwm/adc 段 → HardC Devices 闭包 (相对 HardC 根).
 
-    仅列 Device 具体实现 .c; 父类/Module 由 C-OOP.CMake 的 core glob 覆盖.
+    仅列 Device 具体实现 .c; 父类/Module 由 HardC.CMake 的 core glob 覆盖.
     """
     out: list[str] = []
     pwm = topo.get("pwm") or {}
@@ -59,27 +59,27 @@ def compute_devices(topo: dict) -> list[str]:
 
 
 def series_from_family(family: str) -> str:
-    """'STM32F3' → 'F3' (C_OOP_STM32_SERIES). 未知返回 'F3'."""
+    """'STM32F3' → 'F3' (HARDC_STM32_SERIES). 未知返回 'F3'."""
     fam = (family or "").replace("STM32", "")
     return fam if fam in ("F0", "F1", "F2", "F3", "F4", "F7", "G0", "G4", "H7", "L0", "L4") else "F3"
 
 
-def _build_block(coop_rel: str, driver: str, devices: list[str],
+def _build_block(hardc_rel: str, driver: str, devices: list[str],
                  app_rel: str, series: Optional[str] = None,
                  sdk_dir: Optional[str] = None) -> str:
     lines = [
-        "set(C_OOP_DIR  " + coop_rel + ")",
-        f"set(C_OOP_DRIVER {driver})",
-        'set(C_OOP_DEVICES "' + ";".join(devices) + '")',
+        "set(HARDC_DIR  " + hardc_rel + ")",
+        f"set(HARDC_DRIVER {driver})",
+        'set(HARDC_DEVICES "' + ";".join(devices) + '")',
     ]
     if driver == "st" and series:
-        lines.append(f"set(C_OOP_STM32_SERIES {series})")
+        lines.append(f"set(HARDC_STM32_SERIES {series})")
     if driver == "c2000" and sdk_dir:
         # 正斜杠 + 引号: Windows 反斜杠会触发 CMake 转义, 路径含空格需引号包裹
         lines.append(f'set(C2000_SDK_DIR "{sdk_dir.replace(chr(92), "/")}")')
-    lines.append("include(${C_OOP_DIR}/cmake/C-OOP.CMake)")
+    lines.append("include(${HARDC_DIR}/cmake/HardC.CMake)")
     lines.append(f"target_sources(${{CMAKE_PROJECT_NAME}} PRIVATE {app_rel})")
-    lines.append("target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE coop)")
+    lines.append("target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE hardc)")
     return "\n".join(lines)
 
 
@@ -109,19 +109,19 @@ def read_text_with_fallback(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def inject_cmake_integration(cm_path: Path, coop_rel: str, driver: str,
+def inject_cmake_integration(cm_path: Path, hardc_rel: str, driver: str,
                              devices: list[str], app_rel: str,
                              series: Optional[str] = None,
                              sdk_dir: Optional[str] = None) -> dict:
-    """往 CMakeLists.txt 幂等注入 C-OOP 接入块.
+    """往 CMakeLists.txt 幂等注入 HardC 接入块.
 
-    series: 仅 st (C_OOP_STM32_SERIES); sdk_dir: 仅 c2000 (C2000_SDK_DIR).
+    series: 仅 st (HARDC_STM32_SERIES); sdk_dir: 仅 c2000 (C2000_SDK_DIR).
     返回 {updated: bool, inserted: bool, old_integration: bool}.
     """
     text = read_text_with_fallback(str(cm_path)) if cm_path.is_file() else ""
     old_integration = _has_old_integration(text)
 
-    block = _build_block(coop_rel, driver, devices, app_rel, series, sdk_dir)
+    block = _build_block(hardc_rel, driver, devices, app_rel, series, sdk_dir)
     wrapped = f"{BEGIN_MARKER}\n{block}\n{END_MARKER}"
 
     begin_idx = text.find(BEGIN_MARKER)
@@ -160,7 +160,7 @@ if __name__ == "__main__":
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
         fh.write(cm.read_text(encoding="utf-8"))
         tmp = Path(fh.name)
-    r = inject_cmake_integration(tmp, "Middlewares/Third_Party/C-OOP", "st",
+    r = inject_cmake_integration(tmp, "Middlewares/Third_Party/HardC", "st",
                                  ["Devices/pwm/pwm_buckboost.c", "Devices/adc/adc_dc_sampler.c"],
                                  "User/Application/app_main.c", "F3")
     print(f"inserted={r['inserted']} old_integration={r['old_integration']}")

@@ -271,14 +271,14 @@ python YmaC\yaml_config_builder.py
 ```
 
 - **依赖**：`pip install PyQt6 pyyaml darkdetect`；运行时调参（Tab3）另需 `pip install pyserial`（未装则 Tab3 显示提示并禁用控件，不影响 Tab1/Tab2）。
-- **工作目录**：从项目根目录或任意子目录启动均可 —— 工具向上搜索 `Config/` + `App/` 定位 C-OOP 工程根。
+- **工作目录**：从项目根目录或任意子目录启动均可 —— 工具向上搜索 `Config/` + `App/` 定位 HardC 工程根。
 - 无 GUI 环境时可用 CLI：`python YmaC/yaml_config_builder.py --cli default`（列出 `Config/params` 变体并注入；无物化副本时提示"需先在 GUI 生成工程"）。
 
 ### 2. 界面三 Tab 总览
 
 | Tab | 功能 | 关键点 |
 |-----|------|--------|
-| **Tab1 参数注入** | 既有注入流程（列表选变体 → 预览 → 应用 → 编译） | 发现逻辑**双模式**：legacy（`conf/` + `User/app/`）或 C-OOP（`Config/params/` + 物化 `build/gen/*/app_main.c`） |
+| **Tab1 参数注入** | 既有注入流程（列表选变体 → 预览 → 应用 → 编译） | 发现逻辑**双模式**：legacy（`conf/` + `User/app/`）或 HardC（`Config/params/` + 物化 `build/gen/*/app_main.c`） |
 | **Tab2 拓扑选择** | 选拓扑 → 生成工程 → 参数表 → 写参 → 注入 → 编译 | **主验收路径**，见下节 |
 | **Tab3 运行时调参** | 串口 0xFB 帧下发（复用 `App/pid_tune.h` 协议） | 依赖 `pyserial`；槽位与 Tab2 参数表同源 |
 
@@ -305,7 +305,7 @@ python YmaC\yaml_config_builder.py
 ### 4. Tab1 参数注入（双模式）
 
 - **legacy**：发现 `conf/*.yaml` + `User/app|Application/app_main.c`，行为与旧版一致。
-- **C-OOP**：发现 `Config/params/*.yaml`；注入目标**优先取物化的 `build/gen/<name>/app_main.c`**（按 mtime 取最近副本），找不到再退回 legacy 扫描。
+- **HardC**：发现 `Config/params/*.yaml`；注入目标**优先取物化的 `build/gen/<name>/app_main.c`**（按 mtime 取最近副本），找不到再退回 legacy 扫描。
 - 两套 schema 相同（`config_id`/`description`/`config`），无需改逻辑。
 
 ### 5. Tab3 运行时调参（0xFB）
@@ -342,7 +342,7 @@ python YmaC\yaml_config_builder.py
 | `params` | **调参唯一数据源** —— 每项含 key/type/default/min/max/unit/slot/label，同时驱动 GUI 表单、`Config/params` 写入、0xFB 槽位、C 注入四件事，`slot` 保证离线/在线不漂移 |
 | `tune` | 0xFB 帧参数（frame_len/check_code/slots） |
 
-> **注入域约定**：C-OOP 注入目标是 `ProjectConfig` 根结构体，拓扑控制域默认挂在 **`.power`** 成员下（如 `.power = { .vref = …, .duty_max = … }`），其余顶层条目会编译失败。可调槽位（`params`）与非槽位字段（`pwm.ch_drive/duty_min/duty_max`、`adc.roles.*.ch`）一并覆盖 —— 否则注入会整体替换模板手写默认值，导致 `duty_max=0` 等运行时损坏。新拓扑的控制模块若挂载到别的 ProjectConfig 成员，改 `_build_config_from_form` 的返回键即可。
+> **注入域约定**：HardC 注入目标是 `ProjectConfig` 根结构体，拓扑控制域默认挂在 **`.power`** 成员下（如 `.power = { .vref = …, .duty_max = … }`），其余顶层条目会编译失败。可调槽位（`params`）与非槽位字段（`pwm.ch_drive/duty_min/duty_max`、`adc.roles.*.ch`）一并覆盖 —— 否则注入会整体替换模板手写默认值，导致 `duty_max=0` 等运行时损坏。新拓扑的控制模块若挂载到别的 ProjectConfig 成员，改 `_build_config_from_form` 的返回键即可。
 
 ### 8. 已知边界
 

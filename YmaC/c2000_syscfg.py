@@ -1,4 +1,4 @@
-"""ymac_cfg — TI SysConfig main.syscfg → C2000 外设 YAML (缓存 .coop/periph.yaml).
+"""ymac_cfg — TI SysConfig main.syscfg → C2000 外设 YAML (缓存 .hardc/periph.yaml).
 
 对标 xr_cubemx_cfg 的 .ioc 解析: 提取 ePWM/ADC/CLA 实例 + SYSCLK + SysConfig 产物
 目录, 供 gen_app.py 生成 C2000 版 app_main.c/h.
@@ -172,7 +172,7 @@ def extract_peripherals(root: Path) -> dict:
 # ======== 缓存 (对标 ioc_parse) ========
 
 def parse_and_cache(root: Path, cache_path: Path) -> dict:
-    """解析 main.syscfg 并缓存到 .coop/periph.yaml. 返回 periph dict."""
+    """解析 main.syscfg 并缓存到 .hardc/periph.yaml. 返回 periph dict."""
     periph = extract_peripherals(root)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
@@ -218,7 +218,7 @@ def load_or_parse(root: Path, cache_path: Path, force: bool = False) -> dict:
 
 
 def cache_path_for(root: Path) -> Path:
-    return root / ".coop" / "periph.yaml"
+    return root / ".hardc" / "periph.yaml"
 
 
 if __name__ == "__main__":

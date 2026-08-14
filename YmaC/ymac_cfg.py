@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""ymac_cfg — 对标 xr_cubemx_cfg 的 C-OOP 接入工具链 (CLI).
+"""ymac_cfg — 对标 xr_cubemx_cfg 的 HardC 接入工具链 (CLI).
 
 在 STM32CubeMX / C2000 工程根执行一条命令, 编排逻辑见 engine.run_pipeline:
   1. 探测平台 (.ioc=stm32 / main.syscfg=c2000)
-  2. C-OOP git submodule 接入 (或 --no-submodule adopt 已有目录)
-  3. 解析 .ioc → 外设 YAML (.coop/periph.yaml)
+  2. HardC git submodule 接入 (或 --no-submodule adopt 已有目录)
+  3. 解析 .ioc → 外设 YAML (.hardc/periph.yaml)
   4. 拓扑 + 外设 → 生成 app_main.c/h (完整外设绑定)
-  5. CMakeLists.txt 幂等集成 (YmaC C-OOP BEGIN/END 块)
+  5. CMakeLists.txt 幂等集成 (YmaC HardC BEGIN/END 块)
   6. 编译 (除非 --no-build)
 
 用法:
@@ -75,12 +75,12 @@ def load_params(path: Optional[Path]) -> Optional[dict]:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="C-OOP 接入工具链 (对标 xr_cubemx_cfg)")
+    ap = argparse.ArgumentParser(description="HardC 接入工具链 (对标 xr_cubemx_cfg)")
     ap.add_argument("-d", "--dir", default=".", help="外部工程根 (含 .ioc/.syscfg)")
     ap.add_argument("--topology", default="buck", help="拓扑名 (Config/topologies/<name>.yaml)")
-    ap.add_argument("--git-source", default=None, help="C-OOP git 仓库 URL (submodule add)")
-    ap.add_argument("--coop-path", default=None, help="--no-submodule 时 C-OOP 目录路径")
-    ap.add_argument("--no-submodule", action="store_true", help="adopt 已有 C-OOP 目录, 不做 submodule")
+    ap.add_argument("--git-source", default=None, help="HardC git 仓库 URL (submodule add)")
+    ap.add_argument("--hardc-path", default=None, help="--no-submodule 时 HardC 目录路径")
+    ap.add_argument("--no-submodule", action="store_true", help="adopt 已有 HardC 目录, 不做 submodule")
     ap.add_argument("--no-build", action="store_true", help="跳过构建")
     ap.add_argument("--params", default=None, help="参数 YAML (平铺或 config: {power: {...}})")
     ap.add_argument("--sdk-dir", default=None, help="c2000: C2000Ware/DigitalPower SDK 根 (缺省自动探测)")
@@ -98,7 +98,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         params=params,
         opts={
             "no_submodule": args.no_submodule,
-            "coop_path": Path(args.coop_path) if args.coop_path else None,
+            "hardc_path": Path(args.hardc_path) if args.hardc_path else None,
             "git_source": args.git_source,
             "no_build": args.no_build,
             "sdk_dir": args.sdk_dir,

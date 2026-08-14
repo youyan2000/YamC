@@ -294,7 +294,7 @@ def _inject_driverlib_h(text: str) -> str:
 
     TI 约定: driverlib.h 必须是第一个 include — C28x 字寻址, CGT <stdint.h> 不定义
     uint8_t, 它只来自 hw_types.h 的 `typedef uint16_t uint8_t`; 若在 app_main.h
-    之后引入, 所有 C-OOP 头的 uint8_t 使用会先报未定义再冲突.
+    之后引入, 所有 HardC 头的 uint8_t 使用会先报未定义再冲突.
     """
     lines = text.splitlines(keepends=True)
     for i, line in enumerate(lines):
@@ -367,9 +367,9 @@ def inject_bsp_block(out_c: Path, block: str) -> bool:
 
 # ======== 顶层编排 ========
 
-def load_topology(coop_dir: Path, name: str) -> dict:
+def load_topology(hardc_dir: Path, name: str) -> dict:
     """从 submodule 读 Config/topologies/<name>.yaml."""
-    path = coop_dir / "Config" / "topologies" / f"{name}.yaml"
+    path = hardc_dir / "Config" / "topologies" / f"{name}.yaml"
     if not path.is_file():
         raise FileNotFoundError(f"拓扑不存在: {path}")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -379,12 +379,12 @@ def load_topology(coop_dir: Path, name: str) -> dict:
 
 
 def gen_app(topo: dict, periph: dict, params: Optional[dict],
-            coop_dir: Path, out_dir: Path) -> dict:
+            hardc_dir: Path, out_dir: Path) -> dict:
     """生成 app_main.c/h 到 out_dir. 返回 {app_c, app_h, config_id}."""
     out_c = out_dir / "app_main.c"
     out_h = out_dir / "app_main.h"
-    tmpl_c = coop_dir / "App" / "app_main.c.tmpl"
-    tmpl_h = coop_dir / "App" / "app_main.h.tmpl"
+    tmpl_c = hardc_dir / "App" / "app_main.c.tmpl"
+    tmpl_h = hardc_dir / "App" / "app_main.h.tmpl"
 
     # app_main.c: 物化 → 平台头注入 (STM32: main.h + HAL 句柄 extern; C2000: driverlib.h)
     text = tmpl_c.read_text(encoding="utf-8")
@@ -415,7 +415,7 @@ if __name__ == "__main__":
     from project_probe import find_ioc
 
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-    coop = Path(sys.argv[2] if len(sys.argv) > 2 else ".")
+    hardc = Path(sys.argv[2] if len(sys.argv) > 2 else ".")
     ioc = find_ioc(root)
     if ioc:
         from ioc_parse import load_or_parse, cache_path_for
@@ -428,13 +428,13 @@ if __name__ == "__main__":
     else:
         print(f"[FAIL] 未找到 .ioc 或 main.syscfg: {root}", file=sys.stderr)
         sys.exit(1)
-    topo = load_topology(coop, "buck")
+    topo = load_topology(hardc, "buck")
     print("==== BSP 绑定块 ====")
     print(gen_bsp_block(topo, periph))
     print()
     print("==== CONFIG 块 ====")
     print(render_power_config(topo)[0])
     with tempfile.TemporaryDirectory() as td:
-        out = gen_app(topo, periph, None, coop, Path(td))
+        out = gen_app(topo, periph, None, hardc, Path(td))
         print()
         print(f"==== 生成: {out['app_c']} (config_id={out['config_id']}) ====")

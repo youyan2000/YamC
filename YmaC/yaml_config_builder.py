@@ -6,7 +6,7 @@ YAML Config Builder — 通用 YAML → C 代码配置注入工具
 
 双布局支持：
 - legacy：conf/*.yaml 配置变体 → User/app/ 或 User/Application/app_main.c
-- C-OOP：Config/params/*.yaml → build/gen/<name>/app_main.c（物化副本）
+- HardC：Config/params/*.yaml → build/gen/<name>/app_main.c（物化副本）
 
 三 Tab GUI：
 - Tab1 参数注入：扫描配置变体 → 预览 → 注入 → 编译
@@ -54,8 +54,8 @@ _APP_SUBDIRS = [
     ("User", "app"),
     ("User", "Application"),
 ]
-# C-OOP 布局特征目录：Config/ + App/（拓扑/工程/参数 三层 YAML）
-_COOP_DIRS = ("Config", "App")
+# HardC 布局特征目录：Config/ + App/（拓扑/工程/参数 三层 YAML）
+_HARDC_DIRS = ("Config", "App")
 
 
 def _first_app_dir(project_root: Path) -> Optional[Path]:
@@ -67,9 +67,9 @@ def _first_app_dir(project_root: Path) -> Optional[Path]:
     return None
 
 
-def _is_coop_root(root: Path) -> bool:
-    """判断是否为 C-OOP 仓库根（Config/ + App/ 同时存在）。"""
-    return all((root / name).is_dir() for name in _COOP_DIRS)
+def _is_hardc_root(root: Path) -> bool:
+    """判断是否为 HardC 仓库根（Config/ + App/ 同时存在）。"""
+    return all((root / name).is_dir() for name in _HARDC_DIRS)
 
 
 def _find_materialized_target(project_root: Path) -> Optional[Path]:
@@ -88,13 +88,13 @@ def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
 
     双模式识别：
     - legacy：含 conf/ 和 User/app/ 或 User/Application/
-    - C-OOP：含 Config/ 和 App/
+    - HardC：含 Config/ 和 App/
     """
     here = Path(start or os.getcwd()).resolve()
     for parent in [here] + list(here.parents):
         if (parent / "conf").is_dir() and _first_app_dir(parent) is not None:
             return parent
-        if _is_coop_root(parent):
+        if _is_hardc_root(parent):
             return parent
     return None
 
@@ -102,10 +102,10 @@ def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
 def find_target_file(project_root: Path) -> Optional[Path]:
     """查找注入目标文件。
 
-    C-OOP 优先返回 build/gen/<name>/app_main.c（物化副本）；
+    HardC 优先返回 build/gen/<name>/app_main.c（物化副本）；
     legacy 保持原有 User/app/ 或 User/Application/ 扫描逻辑。
     """
-    if _is_coop_root(project_root):
+    if _is_hardc_root(project_root):
         materialized = _find_materialized_target(project_root)
         if materialized is not None:
             return materialized
@@ -223,7 +223,7 @@ def render_config_block(config: dict, indent_step: int = 4) -> str:
 def scan_configs(conf_dir: Path) -> list[dict]:
     """扫描目录下 *.yaml，返回 [{path, config_id, description, config}, ...]。
 
-    兼容 legacy conf/*.yaml 与 C-OOP Config/params/*.yaml（schema 均为
+    兼容 legacy conf/*.yaml 与 HardC Config/params/*.yaml（schema 均为
     config_id/description/config）。排除以 _example 或 _template 结尾的文件。
     """
     result: list[dict] = []
@@ -405,17 +405,17 @@ def build_command(build_info: dict) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 
 def run_cli() -> int:
-    """命令行模式：列出配置、应用配置。支持 legacy 与 C-OOP 双布局。"""
+    """命令行模式：列出配置、应用配置。支持 legacy 与 HardC 双布局。"""
     root = find_project_root()
     if root is None:
         print("错误：未找到项目根目录（legacy: **conf/** + **User/app/ 或 User/Application/**；"
-              "C-OOP: **Config/** + **App/**）")
+              "HardC: **Config/** + **App/**）")
         return 1
 
     target = find_target_file(root)
     if target is None:
         print("错误：未找到含 CONFIG 标记的 .c 文件"
-              "（C-OOP 需先在 GUI 生成工程并物化 build/gen/<name>/app_main.c）")
+              "（HardC 需先在 GUI 生成工程并物化 build/gen/<name>/app_main.c）")
         return 1
 
     legacy = (root / "conf").is_dir()
@@ -1030,15 +1030,15 @@ def _build_gui() -> int:
         def _discover_project(self) -> None:
             root = find_project_root()
             if root is None:
-                self._log_msg("⚠ 未找到项目根目录（legacy: conf/ + User/app/；C-OOP: Config/ + App/）")
+                self._log_msg("⚠ 未找到项目根目录（legacy: conf/ + User/app/；HardC: Config/ + App/）")
                 self._lbl_project.setText("项目: 未找到")
                 return
 
             self._project_root = root
-            self._is_coop = _is_coop_root(root)
+            self._is_hardc = _is_hardc_root(root)
             self._lbl_project.setText(f"项目: {root.name}  ({root})")
 
-            if self._is_coop:
+            if self._is_hardc:
                 params_dir = root / "Config" / "params"
                 self._configs = scan_configs(params_dir)
                 self._log_msg(f"扫描 Config/params/ → {len(self._configs)} 个参数变体")
@@ -1189,7 +1189,7 @@ def _build_gui() -> int:
 
             target = getattr(self, "_target_file", None)
             if target is None:
-                QMessageBox.warning(self, "无注入目标", "未找到注入目标（C-OOP 需先在拓扑 Tab 生成工程并物化 app_main.c）。")
+                QMessageBox.warning(self, "无注入目标", "未找到注入目标（HardC 需先在拓扑 Tab 生成工程并物化 app_main.c）。")
                 return
             try:
                 rendered = render_config_block(cfg["config"])
@@ -1470,7 +1470,7 @@ def _build_gui() -> int:
                 return
             self._log_msg(f"✓ 参数已写入 {out_path}")
             # 刷新 Tab1 列表，新变体立即可选
-            if self._is_coop:
+            if self._is_hardc:
                 self._configs = scan_configs(self._project_root / "Config" / "params")
             self._refresh_config_list()
 
@@ -1739,7 +1739,7 @@ def _build_gui() -> int:
         def _build_config_from_form(self) -> dict:
             """由 Tab2 参数表单收集 config 树 → 嵌套到拓扑控制域 (默认 .power)。
 
-            C-OOP 注入目标是 ProjectConfig 根结构体: 拓扑域字段必须挂在 .power 下,
+            HardC 注入目标是 ProjectConfig 根结构体: 拓扑域字段必须挂在 .power 下,
             否则渲染出的 .vref/.pid_v 顶层条目无法编译 (ProjectConfig 没有这些成员)。
             非槽位字段 (PWM 通道/占空比限幅, ADC 通道) 不是可调参数, 但必须一并覆盖,
             否则注入会把模板手写默认值整体替换掉 → duty_max=0 等 → 运行时损坏。
@@ -1845,7 +1845,7 @@ def _build_gui() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("YAML Config Builder")
-    app.setOrganizationName("C-OOP")
+    app.setOrganizationName("HardC")
     _apply_dark(app)
 
     window = _ConfigBuilderWindow()

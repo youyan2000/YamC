@@ -1,7 +1,7 @@
 """ymac_cfg — CLI/GUI 共享接入流水线 (纯编排, 无 GUI 依赖).
 
 对标 xr_cubemx_cfg: 一条流水线在外部工程根完成
-  探测平台 → C-OOP submodule 接入 → .ioc 解析 → 生成 app_main.c/h
+  探测平台 → HardC submodule 接入 → .ioc 解析 → 生成 app_main.c/h
   → CMake 幂等集成 → 构建.
 
 CLI (ymac_cfg.py) 与 GUI (yaml_config_builder.py Tab2) 共用本模块;
@@ -26,7 +26,7 @@ from c2000_syscfg import cache_path_for as c2_cache_path_for, load_or_parse as c
 
 LogFn = Callable[[str, str], None]
 
-DEFAULT_COOP_REL = "Middlewares/Third_Party/C-OOP"
+DEFAULT_HARDC_REL = "Middlewares/Third_Party/HardC"
 
 # 默认日志前缀 (CLI 传自己的 _log, 此处仅兜底打印用, 大小写与 CLI 一致)
 _LEVEL_TAG = {"info": "INFO", "pass": "Pass", "warn": "WARN", "fail": "FAIL"}
@@ -80,42 +80,42 @@ def _git(root: Path, log: LogFn, *args: str) -> bool:
         return False
 
 
-# ======== C-OOP 接入 (git submodule) ========
+# ======== HardC 接入 (git submodule) ========
 
-def ensure_coop_dir(root: Path, log: LogFn, no_submodule: bool = False,
-                    coop_path: Optional[Path] = None,
+def ensure_hardc_dir(root: Path, log: LogFn, no_submodule: bool = False,
+                    hardc_path: Optional[Path] = None,
                     git_source: Optional[str] = None) -> Path:
-    """返回 C-OOP 目录 (绝对). 无 remote 时 --no-submodule 或 adopt 已有目录."""
+    """返回 HardC 目录 (绝对). 无 remote 时 --no-submodule 或 adopt 已有目录."""
     if no_submodule:
-        coop = (coop_path or root / DEFAULT_COOP_REL).resolve()
-        if not (coop / "cmake" / "C-OOP.CMake").is_file():
-            raise PipelineError(f"--no-submodule 但 {coop} 不是 C-OOP (缺 cmake/C-OOP.CMake)")
-        return coop
+        hardc = (hardc_path or root / DEFAULT_HARDC_REL).resolve()
+        if not (hardc / "cmake" / "HardC.CMake").is_file():
+            raise PipelineError(f"--no-submodule 但 {hardc} 不是 HardC (缺 cmake/HardC.CMake)")
+        return hardc
 
-    coop = root / DEFAULT_COOP_REL
+    hardc = root / DEFAULT_HARDC_REL
     gmodules = root / ".gitmodules"
 
-    if coop.is_dir():
-        log("pass", f"C-OOP 已存在: {coop}")
-        return coop.resolve()
+    if hardc.is_dir():
+        log("pass", f"HardC 已存在: {hardc}")
+        return hardc.resolve()
 
     if not (root / ".git").exists():
         log("info", "工程非 git 仓库 → git init")
         _git(root, log, "init")
 
     # submodule 声明存在但目录缺失 → update
-    if gmodules.is_file() and "C-OOP" in gmodules.read_text(encoding="utf-8", errors="replace"):
+    if gmodules.is_file() and "HardC" in gmodules.read_text(encoding="utf-8", errors="replace"):
         log("info", "submodule 已声明 → git submodule update --init")
-        if _git(root, log, "submodule", "update", "--init", DEFAULT_COOP_REL):
-            return coop.resolve()
+        if _git(root, log, "submodule", "update", "--init", DEFAULT_HARDC_REL):
+            return hardc.resolve()
 
     if not git_source:
-        raise PipelineError("C-OOP 目录缺失: 请提供 C-OOP 仓库 URL 接入, 或跳过 submodule adopt 已有目录")
+        raise PipelineError("HardC 目录缺失: 请提供 HardC 仓库 URL 接入, 或跳过 submodule adopt 已有目录")
 
     log("info", f"git submodule add {git_source}")
-    if not _git(root, log, "submodule", "add", git_source, DEFAULT_COOP_REL):
+    if not _git(root, log, "submodule", "add", git_source, DEFAULT_HARDC_REL):
         raise PipelineError("submodule add 失败")
-    return coop.resolve()
+    return hardc.resolve()
 
 
 # ======== 构建 ========
@@ -182,16 +182,16 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
     topology: 拓扑名 (Config/topologies/<name>.yaml)
     params:  参数 dict 覆盖拓扑默认; 平铺 {'vref': 12.5, 'pid_v.kp': 2.0} 或
              嵌套 {'power': {...}} (GUI 表单) 均可, 内部归一化平铺
-    opts:   {no_submodule, coop_path, git_source, no_build, out_rel}
+    opts:   {no_submodule, hardc_path, git_source, no_build, out_rel}
     log:    日志回调 (level, msg); 默认打印 [LEVEL] msg
 
-    返回: {ok, exit_code, reason?, root, platform, coop, app_c, config_id,
+    返回: {ok, exit_code, reason?, root, platform, hardc, app_c, config_id,
            cmake_inserted, cmake_old_integration, built}
     """
     logger: LogFn = log or (lambda level, msg: print(f"[{_LEVEL_TAG.get(level, level.upper())}] {msg}"))
     opts = opts or {}
     no_submodule = bool(opts.get("no_submodule", False))
-    coop_path = opts.get("coop_path")
+    hardc_path = opts.get("hardc_path")
     git_source = opts.get("git_source")
     no_build = bool(opts.get("no_build", False))
     out_rel = str(opts.get("out_rel", "User/Application"))
@@ -210,11 +210,11 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
         logger("pass", f"平台: {platform}")
         out["platform"] = platform
 
-        # 2. C-OOP 接入
-        logger("info", "接入 C-OOP (git submodule)")
-        coop = ensure_coop_dir(root, logger, no_submodule, coop_path, git_source)
-        logger("pass", f"C-OOP: {coop}")
-        out["coop"] = str(coop)
+        # 2. HardC 接入
+        logger("info", "接入 HardC (git submodule)")
+        hardc = ensure_hardc_dir(root, logger, no_submodule, hardc_path, git_source)
+        logger("pass", f"HardC: {hardc}")
+        out["hardc"] = str(hardc)
 
         # 3. 外设解析 (平台分派)
         sdk_dir = None
@@ -239,19 +239,19 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
 
         # 4. 拓扑 + 生成
         try:
-            topo = load_topology(coop, topology)
+            topo = load_topology(hardc, topology)
         except FileNotFoundError:
-            raise PipelineError(f"拓扑不存在: Config/topologies/{topology}.yaml (在 {coop})")
+            raise PipelineError(f"拓扑不存在: Config/topologies/{topology}.yaml (在 {hardc})")
         if topo.get("status") != "ready":
             logger("warn", f"拓扑 {topology} 状态为 {topo.get('status')}, 继续生成")
         out_dir = root / out_rel
         logger("info", f"生成 app_main.c/h → {out_dir.relative_to(root)}")
-        result = gen_app(topo, periph, normalize_params(params), coop, out_dir)
+        result = gen_app(topo, periph, normalize_params(params), hardc, out_dir)
         logger("pass", f"app_main.c 生成 (config_id={result['config_id']})")
         out["app_c"] = str(result["app_c"])
         out["config_id"] = result["config_id"]
 
-        # 5. CMake 集成 (平台分派: st → C_OOP_STM32_SERIES; c2000 → C2000_SDK_DIR)
+        # 5. CMake 集成 (平台分派: st → HARDC_STM32_SERIES; c2000 → C2000_SDK_DIR)
         cm = root / "CMakeLists.txt"
         if not cm.is_file():
             raise PipelineError(f"未找到 {cm} — 无法集成构建")
@@ -259,26 +259,26 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
         extra = ""
         if platform == "stm32":
             series = series_from_family(periph["mcu"].get("family", ""))
-            r = inject_cmake_integration(cm, DEFAULT_COOP_REL, "st", devices,
+            r = inject_cmake_integration(cm, DEFAULT_HARDC_REL, "st", devices,
                                          f"{out_rel}/app_main.c", series, None)
             extra = f"series={series}"
         else:  # c2000
-            r = inject_cmake_integration(cm, DEFAULT_COOP_REL, "c2000", devices,
+            r = inject_cmake_integration(cm, DEFAULT_HARDC_REL, "c2000", devices,
                                          f"{out_rel}/app_main.c", None, sdk_dir)
             extra = f"sdk_dir={'给出' if sdk_dir else '缺失(构建会失败, 用 --sdk-dir)'}"
         out["cmake_inserted"] = r["inserted"]
         out["cmake_old_integration"] = r["old_integration"]
         if r["old_integration"]:
             logger("warn", "检测到旧版 User/Components... 手工集成, 请手工移除后重跑")
-        logger("pass", f"CMake 集成: {'插入' if r['inserted'] else '更新'} C-OOP 块 ({extra})")
+        logger("pass", f"CMake 集成: {'插入' if r['inserted'] else '更新'} HardC 块 ({extra})")
 
         # 6. 构建
         if no_build:
             logger("pass", "构建跳过 (--no-build)")
             out["built"] = False
         elif platform == "c2000":
-            toolchain = coop / "cmake" / "c2000-ti-cgt.cmake"
-            logger("info", f"C2000 构建: cl2000 工具链 {toolchain.relative_to(coop)}")
+            toolchain = hardc / "cmake" / "c2000-ti-cgt.cmake"
+            logger("info", f"C2000 构建: cl2000 工具链 {toolchain.relative_to(hardc)}")
             if run_build(root, logger, toolchain):
                 logger("pass", "构建通过")
                 out["built"] = True

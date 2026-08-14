@@ -1,4 +1,4 @@
-"""ymac_cfg — STM32CubeMX .ioc → 外设 YAML (缓存 .coop/periph.yaml).
+"""ymac_cfg — STM32CubeMX .ioc → 外设 YAML (缓存 .hardc/periph.yaml).
 
 对标 xr_cubemx_cfg 的 .ioc 解析: 提取 HRTIM/ADC/UART/CAN 实例 + DMA + 引脚映射,
 供 gen_app.py 生成带完整外设绑定的 app_main.c/h.
@@ -229,7 +229,7 @@ def _first_pin_of(raw: dict, signal_prefix: str) -> Optional[str]:
 
 
 def parse_and_cache(ioc_path: Path, cache_path: Path) -> dict:
-    """解析 .ioc 并缓存到 .coop/periph.yaml. 返回 periph dict."""
+    """解析 .ioc 并缓存到 .hardc/periph.yaml. 返回 periph dict."""
     raw = _read_ioc(ioc_path)
     periph = extract_peripherals(raw)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,7 +261,7 @@ def load_or_parse(ioc_path: Path, cache_path: Path, force: bool = False) -> dict
 
 
 def cache_path_for(root: Path, ioc_path: Path) -> Path:
-    return root / ".coop" / f"{ioc_path.stem}.periph.yaml"
+    return root / ".hardc" / f"{ioc_path.stem}.periph.yaml"
 
 
 if __name__ == "__main__":
