@@ -29,8 +29,10 @@ from project_probe import find_ioc, _read_ioc, _to_int
 # HRTIM 子定时器: Periode_TA 存在 → Timer A 被使用
 _HRTIM_TIMERS = ("A", "B", "C", "D", "E", "F")
 # 死区插入标志: DeadTimeInsertion-Output_TA1TA2=...ENABLED → 互补输出.
-# 注: 目前仅覆盖 F334 (单 HRTIM1, 死区键/时钟硬编码 HRTIM1); G474 双 HRTIM 需推广.
-_DEADTIME_KEY = "HRTIM1.DeadTimeInsertion-Output_T{t}1T{t}2"
+# 键按实例前缀 (HRTIM1/HRTIM2) 生成 → 支持 G474 双 HRTIM.
+_DEADTIME_KEY = "{ip}.DeadTimeInsertion-Output_T{t}1T{t}2"
+# HRTIM 时钟键: G474 双实例各有 RCC.HRTIM1Freq_Value / RCC.HRTIM2Freq_Value.
+_CLK_KEY = "RCC.{ip}Freq_Value"
 
 
 def extract_peripherals(raw: dict) -> dict:
@@ -62,7 +64,7 @@ def _extract_mcu(raw: dict) -> dict:
 
 
 def _extract_hrtim(raw: dict) -> list:
-    """HRTIM1 子定时器 (Periode_TX) + 死区插入 + 输出引脚."""
+    """HRTIM 实例子定时器 (Periode_TX) + 死区插入 + 输出引脚."""
     instances: list = []
     for ip in _ip_list(raw):
         if not ip.startswith("HRTIM"):
@@ -71,7 +73,7 @@ def _extract_hrtim(raw: dict) -> list:
         for t in _HRTIM_TIMERS:
             period_key = f"{ip}.Periode_T{t}"
             if period_key in raw:
-                complementary = raw.get(_DEADTIME_KEY.format(t=t), "").endswith("ENABLED")
+                complementary = raw.get(_DEADTIME_KEY.format(ip=ip, t=t), "").endswith("ENABLED")
                 timers.append({
                     "name": t,
                     "period": _to_int(raw[period_key]) or 0,
@@ -79,7 +81,7 @@ def _extract_hrtim(raw: dict) -> list:
                 })
         if not timers:
             continue
-        clk = _to_int(raw.get("RCC.HRTIM1Freq_Value")) or 0
+        clk = _to_int(raw.get(_CLK_KEY.format(ip=ip))) or _to_int(raw.get("RCC.HRTIM1Freq_Value")) or 0
         instances.append({
             "instance": ip,
             "handle": _handle(ip),
