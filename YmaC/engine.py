@@ -87,9 +87,22 @@ def ensure_hardc_dir(root: Path, log: LogFn, no_submodule: bool = False,
                     git_source: Optional[str] = None) -> Path:
     """返回 HardC 目录 (绝对). 无 remote 时 --no-submodule 或 adopt 已有目录."""
     if no_submodule:
-        hardc = (hardc_path or root / DEFAULT_HARDC_REL).resolve()
+        if hardc_path is not None:
+            # 显式给出 → 不静默回退 (拼错路径应立即暴露)
+            hardc = hardc_path.resolve()
+            if not (hardc / "cmake" / "HardC.CMake").is_file():
+                raise PipelineError(f"--no-submodule 但 {hardc} 不是 HardC (缺 cmake/HardC.CMake)")
+            return hardc
+        # 未显式给 --hardc-path: 先试工程内 Middlewares 路径, 再默认 adopt 工具链自身仓库
+        # (工具链随库: YmaC/ 的上两级 = HardC 根). 守卫校验 HardC.CMake 存在.
+        hardc = (root / DEFAULT_HARDC_REL).resolve()
         if not (hardc / "cmake" / "HardC.CMake").is_file():
-            raise PipelineError(f"--no-submodule 但 {hardc} 不是 HardC (缺 cmake/HardC.CMake)")
+            toolchain_root = Path(__file__).resolve().parent.parent
+            if (toolchain_root / "cmake" / "HardC.CMake").is_file():
+                log("warn", f"{hardc} 不是 HardC, 改用工具链自身仓库 {toolchain_root}")
+                hardc = toolchain_root
+            else:
+                raise PipelineError(f"--no-submodule 但 {hardc} 不是 HardC (缺 cmake/HardC.CMake)")
         return hardc
 
     hardc = root / DEFAULT_HARDC_REL

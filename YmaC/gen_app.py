@@ -105,12 +105,18 @@ def _gen_pwm_buckboost(pwm_cfg: dict, periph: dict) -> list[str]:
     freq = int(pwm_cfg.get("freq_hz", 100000))
     deadtime = int(pwm_cfg.get("deadtime_ns", 0))
     sync_rect = bool(pwm_cfg.get("sync_rect", False))
-    ch_drive = int(pwm_cfg.get("ch_drive", 0))
     mode = str(pwm_cfg.get("mode", "Buck"))
 
     hrtims = periph["peripherals"]["hrtim"]
     if not hrtims:
         return ["// WARN: .ioc 无 HRTIM — 未生成 PWM 绑定"]
+
+    # 多相 (phase_legs): 每相两腿 = 2 定时器 (supercap_3ph 3 相 × 2 腿 = 6 定时器)
+    phase_legs = pwm_cfg.get("phase_legs")
+    if phase_legs:
+        return _gen_bb_phases(phase_legs, freq, deadtime, sync_rect, mode, hrtims)
+
+    ch_drive = int(pwm_cfg.get("ch_drive", 0))
     hrtim = hrtims[0]
 
     letter = chr(ord("A") + min(ch_drive, 5))
@@ -134,6 +140,69 @@ def _gen_pwm_buckboost(pwm_cfg: dict, periph: dict) -> list[str]:
     for o in hrtim.get("outputs", []):
         if o.get("pin") and o.get("signal", "").startswith(sig_prefix):
             lines.append(f"//   {o['pin']} → {o['signal']}")
+    return lines
+
+
+_BB_MAX_PHASES = 3  # 与 Devices/pwm/pwm_buckboost.h 的 PWM_BB_MAX_PHASES 一致
+
+
+def _gen_bb_phases(phase_legs: list, freq: int, deadtime: int, sync_rect: bool, mode: str, hrtims: list) -> list[str]:
+    """phase_legs → pwm_bb_init_phases (PwmBbPhaseCfg[]). 相位定时器 BSP_TIMER_A..F 平铺,
+    落到单个 HRTIM 实例 (supercap_3ph 用 HRTIM1 的 A..F); 跨实例 (G474 双 HRTIM 分腿)
+    需 PwmBuckBoost 扩展多 handle, 当前不支持 → 绑定首个实例并 WARN."""
+    warn: list[str] = []
+    valid_legs = []
+    for leg in phase_legs:
+        keys_ok = all(isinstance(leg.get(k), str) and leg[k] for k in ("timer_a", "mask_a", "timer_b", "mask_b"))
+        names_ok = keys_ok and str(leg["timer_a"]).startswith("BSP_TIMER_") and str(leg["timer_b"]).startswith("BSP_TIMER_")
+        if names_ok:
+            valid_legs.append(leg)
+        else:
+            warn.append("// WARN: phase_legs 条目缺 timer_a/mask_a/timer_b/mask_b 或定时器名非 BSP_TIMER_A..F — 该腿已跳过")
+    if len(valid_legs) == 0:
+        return warn + ["// ERROR: 无合法 phase_legs 条目 — 未生成 PWM 绑定"]
+    n = len(valid_legs)
+    if n > _BB_MAX_PHASES:
+        warn.append(f"// WARN: {n} 相超出上限 {_BB_MAX_PHASES}, 取前 {_BB_MAX_PHASES} 相")
+        n = _BB_MAX_PHASES
+    letters = [str(x).replace("BSP_TIMER_", "") for leg in valid_legs[:n] for x in (leg["timer_a"], leg["timer_b"])]
+
+    def has_all(h: dict) -> bool:
+        names = {t["name"] for t in h.get("timers", [])}
+        return all(L in names for L in letters)
+
+    hrtim = next((h for h in hrtims if has_all(h)), None)
+    cross = hrtim is None
+    if cross:
+        hrtim = hrtims[0]
+    clk_hz = int(hrtim.get("clk_hz") or 0)
+    clk_src = "SystemCoreClock" if not clk_hz else f"{clk_hz}u"
+
+    cfg_lines = []
+    for leg in valid_legs[:n]:
+        leg_b = "true" if leg.get("leg_b_used", True) else "false"
+        cfg_lines.append(
+            f"    {{ {leg['timer_a']}, {leg['mask_a']}, {leg['timer_b']}, {leg['mask_b']}, /*leg_b_used=*/{leg_b} }},")
+
+    lines = [
+        f"// {hrtim['instance']} {n} 相 × 2 腿 = {2 * n} 定时器 — {freq} Hz {mode} "
+        f"(sync_rect={str(sync_rect).lower()})",
+    ]
+    lines += warn
+    if cross:
+        lines.append(f"// WARN: 所需定时器 {','.join(letters)} 跨实例/缺失, 绑定到 {hrtim['instance']} — "
+                     f"跨实例分腿需扩展 PwmBuckBoost 多 handle")
+    lines += [
+        f"pwm_bb_init_phases(&g_root.drv_buck_pwm, {freq}u, {n},",
+        f"                   (PwmBbPhaseCfg[]){{",
+        *cfg_lines,
+        f"}}, PwmMode_{mode}, /*sync_rect=*/{str(sync_rect).lower()});",
+        # pwm_bb_init_phases 清零 bsp_cfg → 后填句柄/时钟, 再重算 period/deadtime
+        f"g_root.drv_buck_pwm.bsp_cfg.handle = &{hrtim['handle']};",
+        f"g_root.drv_buck_pwm.bsp_cfg.clk_hz = {clk_src};",
+        f"pwm_bb_set_freq(&g_root.drv_buck_pwm, {freq}u);",
+        f"pwm_bb_set_deadtime(&g_root.drv_buck_pwm, {deadtime}u);",
+    ]
     return lines
 
 
@@ -170,7 +239,7 @@ def _gen_adc(adc_cfg: dict, periph: dict) -> list[str]:
 
     lines = [
         f"// ADC {adc['instance']} ({num_ch} 通道, {dma.get('instance', '无DMA')})",
-        f"adc_dc_sampler_init(&g_root.drv_dc_adc, &{adc['handle']}, {dma_handle}, {num_ch},",
+        f"adc_dc_sampler_init(&g_root.drv_dc_adc, IO_ASYNC_FLAG, &{adc['handle']}, {dma_handle}, {num_ch},",
         f"                    (float[]){{{k_str}}}, NULL, NULL);",
     ]
     for rank, c in enumerate(channels[:num_ch]):
@@ -264,7 +333,7 @@ def _gen_adc_c2000(adc_cfg: dict, periph: dict) -> list[str]:
     k_str = ", ".join(f"{g:.4f}f" for g in gains)
     lines = [
         f"// ADC {adc['instance']} ({adc['base']}) — {num_ch} 通道, ePWM 触发 (单转换源, 每控制周期一次 SOC)",
-        f"adc_dc_sampler_init(&g_root.drv_dc_adc, (void*){adc['base']}, NULL, {num_ch},",
+        f"adc_dc_sampler_init(&g_root.drv_dc_adc, IO_ASYNC_FLAG, (void*){adc['base']}, NULL, {num_ch},",
         f"                    (float[]){{{k_str}}}, NULL, NULL);",
     ]
     for rank in range(num_ch):

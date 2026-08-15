@@ -44,9 +44,11 @@ def _has_old_integration(text: str) -> bool:
 
 
 def compute_devices(topo: dict) -> list[str]:
-    """拓扑 pwm/adc 段 → HardC Devices 闭包 (相对 HardC 根).
+    """拓扑 pwm/adc/comm/per 段 → HardC Devices 闭包 (相对 HardC 根).
 
     仅列 Device 具体实现 .c; 父类/Module 由 HardC.CMake 的 core glob 覆盖.
+    comm 段: 传输类按键名映射 (can→com_can, uart→com_uart, spi→com_spi,
+             i2c→com_i2c, gpio→com_gpio); per 段: 外设名列表 → per_<name>.c.
     """
     out: list[str] = []
     pwm = topo.get("pwm") or {}
@@ -55,6 +57,18 @@ def compute_devices(topo: dict) -> list[str]:
         out.append(f"Devices/pwm/{pwm['device']}.c")
     if adc.get("device"):
         out.append(f"Devices/adc/{adc['device']}.c")
+    # comm: 传输类 (Key 已删, 去抖归 HMI; 按拓扑声明的总线键收录)
+    _COMM_BUS = {"can": "com_can", "uart": "com_uart", "spi": "com_spi",
+                 "i2c": "com_i2c", "gpio": "com_gpio"}
+    comm = topo.get("comm") or {}
+    for key, cls in _COMM_BUS.items():
+        if key in comm:
+            out.append(f"Devices/comm/{cls}.c")
+    # per: 非总线外设 (OLED/IMU/测距/输出) → Devices/peripheral
+    per = topo.get("per")
+    if isinstance(per, list):
+        for name in per:
+            out.append(f"Devices/peripheral/per_{name}.c")
     return out
 
 
