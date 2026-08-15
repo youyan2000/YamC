@@ -28,6 +28,16 @@ from yaml_config_builder import inject_config, render_config_block
 BSP_BEGIN = "/* YMAC BSP BEGIN */"
 BSP_END = "/* YMAC BSP END */"
 
+# 模块接线锚点 (模板 app_main.c/h.tmpl; 契约见 docs/debug/build-toolchain-design.md §4.8)
+MODULES_BEGIN = "/* YMAC MODULES BEGIN */"
+MODULES_END = "/* YMAC MODULES END */"
+CFGSTRUCT_BEGIN = "/* YMAC CFGSTRUCT BEGIN */"
+CFGSTRUCT_END = "/* YMAC CFGSTRUCT END */"
+ROOT_BEGIN = "/* YMAC ROOT BEGIN */"
+ROOT_END = "/* YMAC ROOT END */"
+# 模板默认注释行 → 拓扑需要 com_can 类型时启用 (Can/CanConfig, supercap_3ph 订阅分发)
+COM_CAN_INCLUDE_COMMENT = '// #include "com_can.h"'
+
 # ======== 配置 → C 块 ========
 
 def _set_nested(d: dict, dotted: str, value):
@@ -57,27 +67,54 @@ def _flatten_params(params) -> dict:
 
 
 def topo_to_power_cfg(topo: dict, params: Optional[dict] = None) -> dict:
-    """拓扑 + 覆盖参数 → ModBuckCfg 字段 dict (含非槽位通道/限幅).
+    """拓扑 + 覆盖参数 → control_module cfg 字段 dict (含非槽位通道/限幅).
 
     params: 平铺 dict {'vref': 12.5, 'pid_v.kp': 2.0}, 覆盖拓扑默认.
+    roles → adc_ch_* 映射按 control_module 形态 (supercap 特例):
+      mod_supercap: 相电流角色 i0/i1/i2 → adc_ch_i[] 数组 (ModSuperCapCfg 字段);
+                    其它角色平铺; pwm duty/ch_drive 不进 cfg (该类型无此字段)
     """
     power = _flatten_params(topo.get("params"))
     for k, v in (params or {}).items():
         _set_nested(power, k, v)
+    cm = (topo.get("control_module") or "").split("/")[-1]
     pwm = topo.get("pwm") or {}
-    for field in ("ch_drive", "duty_min", "duty_max"):
-        if field in pwm:
-            power[field] = pwm[field]
     roles = (topo.get("adc") or {}).get("roles") or {}
-    for role, rcfg in roles.items():
-        power["adc_ch_" + role] = rcfg["ch"]
+    if cm == "mod_supercap":
+        phases = int(topo.get("phases") or (topo.get("share") or {}).get("num_phases") or 1)
+        power["num_phases"] = phases  # 非槽位: 缺省 0 会被 tick 钳位为单相 → 必须显式发射
+        # 非槽位保护/滤波默认 (mod_supercap.h 注释: 短路 2×i_lim_a, 失平衡 0.5×i_lim_a, LPF 120Hz).
+        # 必须显式发射 — apply_config 整块拷贝 g_cfg.power → me->cfg 会覆盖 init 期派生默认,
+        # 缺省 0 会令 |i|>0 即触发短路/失平衡去抖 (假故障). setdefault: 槽位 params 优先.
+        power.setdefault("power_lpf_fc", 120.0)
+        power.setdefault("short_ilim", 2.0 * power.get("i_lim_a", 20.0))
+        power.setdefault("unbalance_thr", 0.5 * power.get("i_lim_a", 20.0))
+        for role, rcfg in roles.items():
+            if role.startswith("i") and role[1:].isdigit():
+                continue  # 相电流角色 → adc_ch_i[] 数组 (下方收集)
+            power["adc_ch_" + role] = rcfg["ch"]
+        i_roles = [(role, rcfg["ch"]) for role, rcfg in roles.items()
+                   if role.startswith("i") and role[1:].isdigit()]
+        i_roles.sort(key=lambda r: int(r[0][1:]))
+        if i_roles:
+            power["adc_ch_i"] = [ch for _, ch in i_roles]
+    else:
+        for field in ("ch_drive", "duty_min", "duty_max"):
+            if field in pwm:
+                power[field] = pwm[field]
+        for role, rcfg in roles.items():
+            power["adc_ch_" + role] = rcfg["ch"]
     return power
 
 
 def render_power_config(topo: dict, params: Optional[dict] = None) -> tuple[str, str]:
-    """拓扑 → {power: ...} 渲染 C 块 + config_id."""
+    """拓扑 → {power: ...} 渲染 C 块 + config_id. 拓扑含 share: 段时一并渲染 (.share)."""
     power = topo_to_power_cfg(topo, params)
-    rendered = render_config_block({"power": power}, indent_step=2)
+    data = {"power": power}
+    share = topo.get("share")
+    if share:
+        data["share"] = dict(share)
+    rendered = render_config_block(data, indent_step=2)
     config_id = str(topo.get("name") or "default")
     return rendered, config_id
 
@@ -98,6 +135,9 @@ def gen_bsp_block(topo: dict, periph: dict) -> str:
         lines.append(f"// WARN: 未知 PWM 设备 {pwm_cfg.get('device')} — 跳过 PWM 绑定")
     adc_cfg = topo.get("adc") or {}
     lines.extend(_gen_adc(adc_cfg, periph))
+    comm_cfg = topo.get("comm") or {}
+    if comm_cfg.get("can"):
+        lines.extend(_gen_can(comm_cfg, periph))
     return "\n".join(lines)
 
 
@@ -182,7 +222,7 @@ def _gen_bb_phases(phase_legs: list, freq: int, deadtime: int, sync_rect: bool, 
     for leg in valid_legs[:n]:
         leg_b = "true" if leg.get("leg_b_used", True) else "false"
         cfg_lines.append(
-            f"    {{ {leg['timer_a']}, {leg['mask_a']}, {leg['timer_b']}, {leg['mask_b']}, /*leg_b_used=*/{leg_b} }},")
+            f"    {{{leg['timer_a']}, {leg['mask_a']}, {leg['timer_b']}, {leg['mask_b']}, /*leg_b_used=*/{leg_b}}},")
 
     lines = [
         f"// {hrtim['instance']} {n} 相 × 2 腿 = {2 * n} 定时器 — {freq} Hz {mode} "
@@ -193,10 +233,11 @@ def _gen_bb_phases(phase_legs: list, freq: int, deadtime: int, sync_rect: bool, 
         lines.append(f"// WARN: 所需定时器 {','.join(letters)} 跨实例/缺失, 绑定到 {hrtim['instance']} — "
                      f"跨实例分腿需扩展 PwmBuckBoost 多 handle")
     lines += [
-        f"pwm_bb_init_phases(&g_root.drv_buck_pwm, {freq}u, {n},",
-        f"                   (PwmBbPhaseCfg[]){{",
+        f"static const PwmBbPhaseCfg sc_phase_cfg[{n}] = {{",
         *cfg_lines,
-        f"}}, PwmMode_{mode}, /*sync_rect=*/{str(sync_rect).lower()});",
+        "};",
+        f"pwm_bb_init_phases(&g_root.drv_buck_pwm, {freq}u, {n}, sc_phase_cfg, "
+        f"PwmMode_{mode}, /*sync_rect=*/{str(sync_rect).lower()});",
         # pwm_bb_init_phases 清零 bsp_cfg → 后填句柄/时钟, 再重算 period/deadtime
         f"g_root.drv_buck_pwm.bsp_cfg.handle = &{hrtim['handle']};",
         f"g_root.drv_buck_pwm.bsp_cfg.clk_hz = {clk_src};",
@@ -239,8 +280,9 @@ def _gen_adc(adc_cfg: dict, periph: dict) -> list[str]:
 
     lines = [
         f"// ADC {adc['instance']} ({num_ch} 通道, {dma.get('instance', '无DMA')})",
-        f"adc_dc_sampler_init(&g_root.drv_dc_adc, IO_ASYNC_FLAG, &{adc['handle']}, {dma_handle}, {num_ch},",
-        f"                    (float[]){{{k_str}}}, NULL, NULL);",
+        f"static const float sc_adc_k[{num_ch}] = {{{k_str}}};",
+        f"adc_dc_sampler_init(&g_root.drv_dc_adc, IO_ASYNC_FLAG, &{adc['handle']}, {dma_handle}, {num_ch}, "
+        f"sc_adc_k, NULL, NULL);",
     ]
     for rank, c in enumerate(channels[:num_ch]):
         role = role_at.get(rank, "")
@@ -249,8 +291,168 @@ def _gen_adc(adc_cfg: dict, periph: dict) -> list[str]:
     return lines
 
 
+def _gen_can(comm_cfg: dict, periph: dict) -> list[str]:
+    """comm.can 段 → CAN 设备绑定 (can_init 挂 HAL 句柄). 订阅分发接缝在 MODULES 锚点 (spec §4.8.4)."""
+    cans = periph.get("peripherals", {}).get("can")
+    if not cans:
+        return ["// WARN: 拓扑 comm.can 要求 CAN 设备, 但 .ioc 无 CAN — 订阅分发 0x061 不可用"]
+    can = cans[0]
+    return [
+        f"// CAN {can['instance']} (handle {can['handle']}) — 帧订阅分发 (TX 0x051 / RX 订阅 0x061)",
+        f"can_init(&g_root.drv_can, &(CanConfig) {{.hcan = &{can['handle']}}});",
+    ]
+
+
 _PWM_DEVICE_GEN = {
     "pwm_buckboost": _gen_pwm_buckboost,
+}
+
+
+# ======== 模块接线生成 (MODULES 锚点, 契约 §4.8) ========
+
+def replace_anchored_block(text: str, begin: str, end: str, block: str) -> str:
+    """在 begin/end 锚点之间写入 block (继承锚点缩进). 锚点缺失 → 原样返回."""
+    b = text.find(begin)
+    e = text.find(end, b)
+    if b == -1 or e == -1:
+        return text
+    line_start = text.rfind("\n", 0, b) + 1
+    indent = text[line_start:b]
+    inner = "\n".join(f"{indent}{l}" if l.strip() else l for l in block.splitlines())
+    new = f"{indent}{begin}\n{inner}\n{indent}{end}"
+    return text[:line_start] + new + text[e + len(end):]
+
+
+def gen_modules_block(topo: dict) -> Optional[tuple]:
+    """control_module → (c_block, h_cfgstruct, h_root); 未知模块 → None (保留模板默认, 零回归).
+
+    c_block:     MODULES 锚点内容 (6 生成函数 + CAN 接缝)
+    h_cfgstruct: CFGSTRUCT 锚点内容 (重定义 PowerCfg) 或 None (不注入)
+    h_root:      ROOT 锚点内容 (电源域根成员) 或 None (不注入)
+    """
+    cm = (topo.get("control_module") or "").split("/")[-1]
+    gen = _MODULE_GEN.get(cm)
+    return gen(topo) if gen else None
+
+
+# supercap_3ph: MODULES 锚点模板. 普通字符串 (C 花括号为字面量), 动态位用 __X__ 占位替换.
+_SUPERCAP_C_TEMPLATE = """// ==== 生成: 拓扑=__TOPOLOGY__ (契约 §4.8; CAN 订阅分发: com_can 订阅表 → mod_can_on_frame) ====
+// 事件日志接缝 (app 侧提供; 发射块内自足声明 — 模板未含 extern, 见 AGENT-SYNC)
+extern void log_evt(uint8_t ev);
+// CAN I/O 接缝 — 生产订阅分发: RX 经 can_poll(&g_root.drv_can) 分发订阅表 → can_rx_061 → mod_can_proto 解析
+//   mod_can_bind(send=can_send_tx, poll=NULL, on_referee) — RX 由 com_can 订阅表驱动, 不再轮询 mod_can_poll
+//   (spec §4.8.4 接缝名 can_send 与 com_can 全局 can_send 同名遮蔽 → 实现改名 can_send_tx)
+static void can_send_tx(uint32_t id, const uint8_t *data, uint8_t dlc) {
+  CommConstData d = {.ptr = data, .len = dlc};
+  (void) can_send(&g_root.drv_can, id, d, IO_ASYNC_FLAG);
+}
+static void can_on_referee(const ModCanReferee *ref) {
+  // 0x061 有效帧 → 超电功率指令 (命令邮箱, MAIN→FAST 周期边界生效)
+  if (ref->enable_conv)
+    mod_supercap_set_referee_power(&g_root.supercap, ref->power_limit_w);
+}
+static void can_rx_061(Can *me, const CanFrame *frame, void *ctx) {
+  (void) me;
+  (void) ctx;
+  mod_can_on_frame(&g_root.can_proto, frame->id, frame->data, frame->dlc);
+}
+
+static void modules_apply_config(void) {
+  // 均流 cfg 同步 + 主模块 cfg 整体拷贝 (PowerCfg == ModSuperCapCfg, 零漂移)
+  g_root.share.cfg = g_cfg.share;
+  g_root.supercap.cfg = g_cfg.power;
+  // 派生: 功率环 PI 限幅/迟滞窗口 + share_gain 注入均流模块
+  mod_supercap_sync_cfg(&g_root.supercap);
+}
+
+static void modules_board_init(void) {
+  // 均流 + 主模块实例化 (cfg 来自 g_cfg, init 内部已 sync)
+  mod_share_init(&g_root.share, &g_cfg.share);
+  mod_supercap_init(&g_root.supercap, &g_cfg.power);
+  // 致命绑定序: 先 share→pwm, 再 supercap→adc+share (base.pwm 快照; 反序急停不封波, mod_supercap.h 头注释)
+  mod_share_bind(&g_root.share, &g_root.drv_buck_pwm);
+  mod_supercap_bind(&g_root.supercap, &g_root.drv_dc_adc, &g_root.share);
+  // CAN 协议 (ctx main): 订阅分发 — send/on_referee 接缝 + 0x061 订阅 (com_can 表满 → ERR_FULL, 启动期即暴露)
+  mod_can_init(&g_root.can_proto);
+  mod_can_bind(&g_root.can_proto, can_send_tx, NULL, can_on_referee);
+  (void) can_register(&g_root.drv_can, MOD_CAN_RX_ID, can_rx_061, &g_root.can_proto);
+  // 0xFB 串口调参: 槽位 0-9 → g_cfg.power → apply_config (见 modules_apply_tune)
+  pid_tune_set_apply_cb(on_pid_tune_received);
+}
+
+static void modules_fast_tick(void) {
+  // 先采样快照 (PingPong 交接, DMA 完成 ISR 标 pending), 再超电控制 (级联+保护+驱动 share→写 PWM)
+  adc_dc_sampler_fetch(&g_root.drv_dc_adc);
+  mod_supercap_tick(&g_root.supercap);
+}
+
+static void modules_slow_tick(void) {
+  // 心跳 → 喂狗 (Heartbeat_Check 返回 true = 超时死锁; FAST 已 Heartbeat_Tick, SLOW 判死)
+  // 健康才喂狗 — 死锁/停摆 → 不喂 → IWDG 硬件复位 (bsp_watchdog.h 头注释)
+  if (!Heartbeat_Check(&g_root.heartbeat, 100))
+    bsp_watchdog_feed();
+  // 遥测: FAST→SLOW Latest 锁存 (监控面读 i_side 快照)
+  (void) latch_peek(&g_root.supercap.telemetry);
+  // 1kHz SLOW ÷5 = 200Hz 遥测发送 (mod_can_tx_telemetry → can_send_tx)
+  static uint8_t can_tx_div;
+  if (++can_tx_div >= 5) {
+    ModCanTelemetry tel;
+    tel.referee_power_limit_w = g_root.supercap.p_lim_hi;
+    tel.chassis_power_w = g_root.supercap.va * g_root.supercap.ichassis;
+    tel.referee_power_w = g_root.supercap.p_referee;
+    tel.supercap_output_mx_w = g_root.supercap.p_lim_lo;
+    tel.output_capability_pct = g_root.supercap.cap_health * 100.0f;
+    mod_can_tx_telemetry(&g_root.can_proto, &tel);
+    can_tx_div = 0;
+  }
+}
+
+static void modules_main_loop(void) {
+  // CAN 轮询 (DMA FIFO → 订阅表分发): 0x061 → can_rx_061 → mod_can_on_frame → can_on_referee
+  can_poll(&g_root.drv_can);
+  // 保护事件排空 (SPSC 环, FAST 单生产者; 事件字节 = comp_error.h 位掩码)
+  uint8_t ev;
+  while (mod_supercap_evt_pop(&g_root.supercap, &ev))
+    log_evt(ev);
+}
+
+static void modules_apply_tune(const float coef[10]) {
+  // 槽位 0-9 → g_cfg.power (同步回配置, 下次 YAML 注入保持一致)
+  // 槽位映射与 Config/topologies/__TOPOLOGY__.yaml params.slot 一致: __SLOT_MAP__
+__TUNE_BODY__
+  // 同步到运行时实例 (整体拷贝 + PI 限幅派生)
+  apply_config();
+}"""
+
+
+def _gen_mod_supercap(topo: dict) -> tuple[str, str, str]:
+    """supercap_3ph: MODULES 锚点 (订阅分发 CAN) + .h 锚点 (CFGSTRUCT/ROOT)."""
+    params = topo.get("params") or []
+    slots = sorted((p for p in params if p.get("slot") is not None), key=lambda p: p["slot"])
+    tune_body = "\n".join(f"  g_cfg.power.{p['key']} = coef[{p['slot']}];" for p in slots)
+    slot_map = " ".join(f"[{p['slot']}]={p['key']}" for p in slots)
+    name = str(topo.get("name") or "?")
+    c_block = (_SUPERCAP_C_TEMPLATE.replace("__TOPOLOGY__", name)
+               .replace("__SLOT_MAP__", slot_map)
+               .replace("__TUNE_BODY__", tune_body))
+    h_cfgstruct = (f"typedef ModSuperCapCfg PowerCfg;  // 拓扑主控制模块 "
+                   f"(control_module: {topo.get('control_module')})")
+    adc = topo.get("adc") or {}
+    h_root = (
+        f"// ==== 由 ymac_cfg 生成: 电源域根成员 (拓扑={name}) ====\n"
+        f"// --- Power-OOP: 电力电子设备 ---\n"
+        f"PwmBuckBoost drv_buck_pwm;  // 三相并联 Buck/Boost PWM (pwm_buckboost.h)\n"
+        f"AdcDcSampler drv_dc_adc;    // 直流采样器 (adc_dc_sampler.h, {adc.get('num_ch', '?')} 通道)\n"
+        f"Can drv_can;                // CAN 传输设备 (com_can.h, 订阅分发 0x061)\n"
+        f"// --- Power-OOP: 电源控制 Module ---\n"
+        f"ModCurrentShare share;      // 三相均流 (mod_current_share.h)\n"
+        f"ModSuperCap supercap;       // 超级电容功率控制 (mod_supercap.h)"
+    )
+    return c_block, h_cfgstruct, h_root
+
+
+_MODULE_GEN = {
+    "mod_supercap": _gen_mod_supercap,
 }
 
 
@@ -333,8 +535,9 @@ def _gen_adc_c2000(adc_cfg: dict, periph: dict) -> list[str]:
     k_str = ", ".join(f"{g:.4f}f" for g in gains)
     lines = [
         f"// ADC {adc['instance']} ({adc['base']}) — {num_ch} 通道, ePWM 触发 (单转换源, 每控制周期一次 SOC)",
-        f"adc_dc_sampler_init(&g_root.drv_dc_adc, IO_ASYNC_FLAG, (void*){adc['base']}, NULL, {num_ch},",
-        f"                    (float[]){{{k_str}}}, NULL, NULL);",
+        f"static const float sc_adc_k[{num_ch}] = {{{k_str}}};",
+        f"adc_dc_sampler_init(&g_root.drv_dc_adc, IO_ASYNC_FLAG, (void*){adc['base']}, NULL, {num_ch}, "
+        f"sc_adc_k, NULL, NULL);",
     ]
     for rank in range(num_ch):
         role = role_at.get(rank, "")
@@ -455,8 +658,29 @@ def gen_app(topo: dict, periph: dict, params: Optional[dict],
     tmpl_c = hardc_dir / "App" / "app_main.c.tmpl"
     tmpl_h = hardc_dir / "App" / "app_main.h.tmpl"
 
-    # app_main.c: 物化 → 平台头注入 (STM32: main.h + HAL 句柄 extern; C2000: driverlib.h)
+    # 模块接线: control_module → MODULES 锚点 + .h 锚点 (CFGSTRUCT/ROOT + com_can 启用)
+    # 未知模块 → 不注入 → 保留模板默认 (Buck 参考, 零回归)
+    mods = gen_modules_block(topo)
+
     text = tmpl_c.read_text(encoding="utf-8")
+    h_text = tmpl_h.read_text(encoding="utf-8")
+    if mods is not None:
+        c_block, h_cfgstruct, h_root = mods
+        if MODULES_BEGIN not in text or MODULES_END not in text:
+            raise RuntimeError(f"MODULES 锚点缺失: {tmpl_c}")
+        text = replace_anchored_block(text, MODULES_BEGIN, MODULES_END, c_block)
+        if h_cfgstruct is not None:
+            if CFGSTRUCT_BEGIN not in h_text or CFGSTRUCT_END not in h_text:
+                raise RuntimeError(f"CFGSTRUCT 锚点缺失: {tmpl_h}")
+            h_text = replace_anchored_block(h_text, CFGSTRUCT_BEGIN, CFGSTRUCT_END, h_cfgstruct)
+        if h_root is not None:
+            if ROOT_BEGIN not in h_text or ROOT_END not in h_text:
+                raise RuntimeError(f"ROOT 锚点缺失: {tmpl_h}")
+            h_text = replace_anchored_block(h_text, ROOT_BEGIN, ROOT_END, h_root)
+        # 启用 com_can.h (Can/CanConfig 类型, 模板默认注释; 订阅分发必需)
+        h_text = h_text.replace(COM_CAN_INCLUDE_COMMENT, COM_CAN_INCLUDE_COMMENT.lstrip("/ "))
+
+    # app_main.c: 物化 → 平台头注入 (STM32: main.h + HAL 句柄 extern; C2000: driverlib.h)
     if periph.get("platform") == "c2000":
         text = _inject_driverlib_h(text)
     else:
@@ -465,7 +689,8 @@ def gen_app(topo: dict, periph: dict, params: Optional[dict],
     out_dir.mkdir(parents=True, exist_ok=True)
     out_c.write_text(text, encoding="utf-8")
 
-    materialize(tmpl_h, out_h)
+    # app_main.h: 物化 + 锚点注入 (CFGSTRUCT/ROOT/com_can 已在 mods 分支处理)
+    out_h.write_text(h_text, encoding="utf-8")
 
     if not inject_bsp_block(out_c, gen_bsp_block(topo, periph)):
         raise RuntimeError(f"未找到 {BSP_BEGIN}/{BSP_END} 锚点: {out_c}")
