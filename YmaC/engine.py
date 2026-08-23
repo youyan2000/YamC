@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from cmake_integrate import compute_devices, inject_cmake_integration, series_from_family
-from gen_app import gen_app, load_topology
+from gen_app import gen_app, gen_bootloader, load_topology
 from ioc_parse import cache_path_for, load_or_parse
 from project_probe import detect_platform, find_ioc, find_project_root
 from c2000_syscfg import cache_path_for as c2_cache_path_for, load_or_parse as c2_load_or_parse
@@ -263,6 +263,17 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
         logger("pass", f"app_main.c 生成 (config_id={result['config_id']})")
         out["app_c"] = str(result["app_c"])
         out["config_id"] = result["config_id"]
+
+        # 4b. Bootloader (拓扑 bootloader.enable → 物化 bootloader_main.c/h 到同 out_dir)
+        bl_cfg = topo.get("bootloader") or {}
+        if isinstance(bl_cfg, dict) and bl_cfg.get("enable"):
+            logger("info", f"Bootloader 启用 — 生成 bootloader_main.c/h (up_port={bl_cfg.get('up_port','uart')})")
+            bl = gen_bootloader(topo, periph, hardc, out_dir)
+            logger("pass", f"bootloader_main.c/h 生成 → {bl['bl_c'].relative_to(root)}")
+            out["bl_c"] = str(bl["bl_c"])
+            out["bl_h"] = str(bl["bl_h"])
+        else:
+            logger("info", "Bootloader 未启用 (拓扑缺 bootloader.enable 或 false), 跳过")
 
         # 5. CMake 集成 (平台分派: st → HARDC_STM32_SERIES; c2000 → C2000_SDK_DIR)
         cm = root / "CMakeLists.txt"

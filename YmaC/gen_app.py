@@ -571,7 +571,7 @@ def _inject_driverlib_h(text: str) -> str:
     lines = text.splitlines(keepends=True)
     for i, line in enumerate(lines):
         if line.strip().startswith('#include'):
-            lines.insert(i, '#include "driverlib.h"  // C2000: 必须先于 app_main.h (uint8_t=uint16_t, 见 hw_types.h)\n')
+            lines.insert(i, '#include "driverlib.h"  // C2000: 必须先于 HardC 头 (app_main.h/bootloader_main.h; uint8_t=uint16_t, 见 hw_types.h)\n')
             break
     return "".join(lines)
 
@@ -635,6 +635,112 @@ def inject_bsp_block(out_c: Path, block: str) -> bool:
     text = text[:line_start] + new + text[e + len(BSP_END):]
     out_c.write_text(text, encoding="utf-8")
     return True
+
+
+# ======== Bootloader 物化 (步骤 3) ========
+
+# Bootloader 模板里的 YmaC 锚点
+BL_CFG_BEGIN = "/* YMAC BOOTLOADER_CFG BEGIN */"
+BL_CFG_END = "/* YMAC BOOTLOADER_CFG END */"
+# 生成的 bsp_flash_map.h (由 YmaC/flash_map_gen.py 从 flash_map.yaml 生成)
+BL_FLASH_MAP_H = "bsp_flash_map.h"
+
+
+def _bootloader_cfg_block(boot_cfg: dict) -> str:
+  """bootloader 拓扑段 → mod_bootloader 默认配置填充 (取 bsp_flash_map.h 宏).
+
+  app_addr/app_max_size 优先取 bsp_flash_map.h 的 BSP_FLASH_APP_ADDR/SIZE (分区真相,
+  保证 Bootloader 跳转地址与 app_flash.ld 一致); 可被拓扑显式覆盖.
+  up_port 提示注释 (UART/CAN 选择随步骤 5 拓扑段接入).
+  """
+  app_addr_expr = boot_cfg.get("app_addr", "BSP_FLASH_APP_ADDR")
+  app_max_expr = boot_cfg.get("app_max_size", "BSP_FLASH_APP_SIZE")
+  up_port = str(boot_cfg.get("up_port") or "uart")
+  lines = [
+    "// YmaC 注入: mod_bootloader 默认配置 (app 分区来自 bsp_flash_map.h, 与 app_flash.ld 同源)",
+    f"  bl_cfg.app_addr = {app_addr_expr};",
+    f"  bl_cfg.app_max_size = {app_max_expr};",
+    f"  bl_cfg.rx_ring_size = 256u;  // 升级传输 '{up_port}'",
+  ]
+  return "\n".join(lines)
+
+
+def _inject_boot_map_include(text: str) -> str:
+  """在 #include \"bootloader_main.h\" 之后插入 #include \"bsp_flash_map.h\"."""
+  lines = text.splitlines(keepends=True)
+  out: list[str] = []
+  inserted = False
+  for line in lines:
+    out.append(line)
+    if not inserted and line.strip().startswith('#include "bootloader_main.h"'):
+      out.append(f'#include "{BL_FLASH_MAP_H}"  // Flash 分区宏 (YmaC/flash_map_gen.py)\n')
+      inserted = True
+  return "".join(out)
+
+
+def _inject_main_h_boot(text: str) -> str:
+  """Bootloader 版平台头注入: 在 `#include "bootloader_main.h"` 后插 `#include "main.h"` (STM32).
+
+  与 _inject_main_h 逻辑相同, 但匹配 bootloader_main.h (app_main 用 _inject_main_h). 幂等.
+  """
+  lines = text.splitlines(keepends=True)
+  out: list[str] = []
+  inserted = False
+  for line in lines:
+    out.append(line)
+    if not inserted and line.strip().startswith('#include "bootloader_main.h"'):
+      out.append('#include "main.h"  // CubeMX HAL 类型 + 宏 (句柄在 main.c, 见下 extern)\n')
+      inserted = True
+  return "".join(out)
+
+
+def gen_bootloader(topo: dict, periph: dict,
+                   hardc_dir: Path, out_dir: Path) -> dict:
+  """生成 bootloader_main.c/h 到 out_dir. 返回 {bl_c, bl_h}.
+
+  复用 materialize + 锚点机制: 物化 bootloader_main.c/h.tmpl, 注入
+    #include "bsp_flash_map.h" + 平台 HAL 头/extern + BOOTLOADER_CFG 配置块.
+
+  bootloader 拓扑段 (topo['bootloader']):
+    enable: true       # 是否生成引导固件
+    up_port: uart|can  # 升级传输 (提示注释; 具体传输绑定随步骤 5 拓扑段接入)
+    app_addr / app_max_size  # 可选显式覆盖 (默认取 bsp_flash_map.h 的 app 分区宏)
+  """
+  out_c = out_dir / "bootloader_main.c"
+  out_h = out_dir / "bootloader_main.h"
+  tmpl_c = hardc_dir / "App" / "bootloader_main.c.tmpl"
+  tmpl_h = hardc_dir / "App" / "bootloader_main.h.tmpl"
+
+  _bl_raw = topo.get("bootloader")
+  _bl_is_dict = isinstance(_bl_raw, dict)
+  boot_cfg = _bl_raw if _bl_is_dict else {}   # 非 dict (bootloader: true) 视为未配置
+
+  text = tmpl_c.read_text(encoding="utf-8")
+  h_text = tmpl_h.read_text(encoding="utf-8")
+
+  # 1) 注入 #include "bsp_flash_map.h" (app 分区宏)
+  if '#include "bsp_flash_map.h"' not in text:
+    text = _inject_boot_map_include(text)
+
+  # 2) 平台 HAL 头 + 句柄 extern (STM32: main.h + UART/CAN 句柄; C2000: driverlib.h)
+  if periph.get("platform") == "c2000":
+    text = _inject_driverlib_h(text)
+  else:
+    text = _inject_main_h_boot(text)
+    text = _inject_handle_externs(text, _collect_handles(periph))
+
+  # 3) BOOTLOADER_CFG 配置块 (仅当拓扑显式含 bootloader 段 dict 且 enable: true 才注入;
+  #    缺 bootloader 段或非 dict → 仅物化骨架, 留模板 3b 兜底, 不注配置)
+  if _bl_is_dict and boot_cfg.get("enable", False):
+    block = _bootloader_cfg_block(boot_cfg)
+    if BL_CFG_BEGIN not in text or BL_CFG_END not in text:
+      raise RuntimeError(f"BOOTLOADER_CFG 锚点缺失: {tmpl_c}")
+    text = replace_anchored_block(text, BL_CFG_BEGIN, BL_CFG_END, block)
+
+  out_dir.mkdir(parents=True, exist_ok=True)
+  out_c.write_text(text, encoding="utf-8")
+  out_h.write_text(h_text, encoding="utf-8")
+  return {"bl_c": out_c, "bl_h": out_h}
 
 
 # ======== 顶层编排 ========

@@ -203,7 +203,7 @@ print('Done')
 
 ## scaffold.py — 工程骨架生成工具
 
-> 目录分组表、MANIFEST schema 与工具规格的完整设计见 [docs/debug/build-toolchain-design.md](../docs/debug/build-toolchain-design.md)。
+> 目录分组表、MANIFEST schema 与工具规格的完整设计见 [docs/PLAN.md](../docs/PLAN.md)。
 > 依赖仅需 `pyyaml`（不需要 PyQt6）。
 
 `scaffold.py` 与 `yaml_config_builder.py` 互补：后者把参数 YAML 注入 `app_main.c` 的 CONFIG 标记区；前者从工程 YAML 起步，自动解析依赖、生成构建文件与 App 骨架。

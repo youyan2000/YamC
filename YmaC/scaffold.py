@@ -343,6 +343,115 @@ def cmd_deps(root, module_id):
   return 0
 
 
+def _render_cmake(root, out, project, mcu, sources, include_dirs, boot_cfg, n_modules):
+  """渲染 CMakeLists 行列表。boot_cfg.enable → 双固件 (bootloader.elf + app.elf + 合并); 否则静态库.
+
+  静态库: add_library(<project> STATIC ...)  —— 既有 scaffold 闭包形态 (供外部工程集成).
+  双固件:
+    add_executable(<project>_bootloader.elf bootloader_main.c + 闭包源)  链接 bootloader_flash.ld
+    add_executable(<project>_app.elf        app_main.c        + 闭包源)  链接 app_flash.ld
+    objcopy 各 .elf → .hex → merge_firmware.py merge → <project>_merged.hex
+  链接脚本与 bsp_flash_map.h 由 flash_map_gen.py 生成到同一 out 目录 (build/gen/<project>/).
+  """
+  lines = []
+  lines.append("# 自动生成 — 不要手动编辑（由 YmaC/scaffold.py gen 生成）")
+  lines.append(f"# 项目: {project}")
+  if mcu:
+    lines.append(f"# MCU:  {mcu}")
+  lines.append(f"# 模块: {n_modules} / 源文件: {len(sources)} / include 路径: {len(include_dirs)}")
+  lines.append("")
+  lines.append("cmake_minimum_required(VERSION 3.13)")
+  lines.append(f"project({project} C)")
+  lines.append("")
+
+  if include_dirs:
+    inc_lines = "\n".join(f"  {d}" for d in include_dirs)
+  else:
+    inc_lines = "  # 无 include 路径"
+
+  if not boot_cfg.get("enable"):
+    lines.append(f"add_library({project} STATIC")
+    if sources:
+      lines.extend(f"  {s}" for s in sources)
+    else:
+      lines.append("  # 无 .c 源文件")
+    lines.append(")")
+    lines.append("")
+    lines.append(f"target_include_directories({project} PUBLIC")
+    lines.append(inc_lines)
+    lines.append(")")
+    lines.append("")
+    return lines
+
+  # ---- 双固件模式: 两个可执行 + 合并 ----
+  lines.append("find_package(Python REQUIRED)")
+  lines.append("")
+  prefix = f"{project.upper()}".replace("-", "_")
+  # 链接脚本目录: 默认本 CMakeLists 所在目录 (flash_map_gen --out 到 build/gen/<project> 即可);
+  #   可用 project.yaml bootloader.flash_dir 指定子目录 (相对 CMakeLists).
+  flash_dir = str((boot_cfg.get("flash_dir") or "").strip()).strip("/")
+  root_posix = root.resolve().as_posix()
+  lines.append("# HardC 仓库根 (绝对, 闭包源/含路径基于此解析)")
+  lines.append(f"set({prefix}_HARDC_ROOT \"{root_posix}\")")
+  link_dir_expr = (f"${{CMAKE_CURRENT_SOURCE_DIR}}/{flash_dir}"
+                   if flash_dir else "${CMAKE_CURRENT_SOURCE_DIR}")
+  lines.append("# 链接脚本目录 (bootloader_flash.ld/app_flash.ld, 由 flash_map_gen 生成)")
+  lines.append(f"set({prefix}_LINK_DIR \"{link_dir_expr}\")")
+  lines.append("")
+  lines.append(f"set({prefix}_CLOSURE_SRCS")
+  for s in sources:
+    lines.append(f"  ${{{prefix}_HARDC_ROOT}}/{s}")
+  lines.append(")")
+  lines.append("")
+  lines.append(f"set({prefix}_INCS")
+  for d in include_dirs:
+    lines.append(f"  ${{{prefix}_HARDC_ROOT}}/{d}")
+  if not include_dirs:
+    lines.append("  # 无 include 路径")
+  lines.append(")")
+  lines.append("")
+  # 工具链在 CMAKE_EXE_LINKER_FLAGS 全局挂了默认 -T <HARDC_LINK_SCRIPT>; 双固件需逐 target
+  #   用各自 .ld, 故先剔除全局默认 -T (LINK_OPTIONS 是追加, 无法覆盖):
+  lines.append("# 剔除工具链全局默认链接脚本 (双固件逐 target 用各自 .ld, 见下)")
+  lines.append("string(REGEX REPLACE \"-T[ \\t][^ ]+\" \"\" CMAKE_EXE_LINKER_FLAGS "
+               "\"${CMAKE_EXE_LINKER_FLAGS}\")")
+  lines.append("")
+  for name, main_c, ld in (("bootloader", "bootloader_main.c", "bootloader_flash.ld"),
+                           ("app", "app_main.c", "app_flash.ld")):
+    target = f"{project}_{name}.elf"
+    # 意图: 关闭 .elf 后缀 (CMake 会对带 .elf 的目标名再补扩展), 改跑输出为 <name>.elf
+    lines.append(f"add_executable({target}")
+    lines.append(f"  {main_c}")
+    lines.append(f"  ${{{prefix}_CLOSURE_SRCS}}")
+    lines.append(")")
+    lines.append("")
+    lines.append(f"target_include_directories({target} PRIVATE ${{{prefix}_INCS}})")
+    # 每个可执行 <project>_bootloader.elf 带 .elf 后缀 → CMake 目标文件实际为 .elf.elf
+    #   (无害; merge 用 target 名做 DEPENDS, objcopy 输出用 $<TARGET_FILE:...>)
+    lines.append(f"set_target_properties({target} PROPERTIES")
+    lines.append(f"  LINK_OPTIONS \"-T;${{{prefix}_LINK_DIR}}/{ld}\"")
+    lines.append(")")
+    lines.append(f"add_custom_command(TARGET {target} POST_BUILD")
+    lines.append(f"  COMMAND ${{CMAKE_OBJCOPY}} -O ihex $<TARGET_FILE:{target}> "
+                 f"${{CMAKE_CURRENT_BINARY_DIR}}/{name}.hex")
+    lines.append(f"  COMMENT \"objcopy → {name}.hex\"")
+    lines.append(")")
+    lines.append("")
+  # 合并两固件为单一烧录映像 (bootloader + app → one .hex)
+  lines.append("# 合并两固件为单一烧录映像 (bootloader + app → one .hex)")
+  lines.append(f"add_custom_target({project}_merge_firmware ALL")
+  lines.append(f"  COMMAND ${{Python_EXECUTABLE}} "
+               f"{(root / 'YmaC' / 'merge_firmware.py').as_posix()} merge")
+  lines.append(f"    -o ${{CMAKE_CURRENT_BINARY_DIR}}/{project}_merged.hex")
+  lines.append(f"    ${{CMAKE_CURRENT_BINARY_DIR}}/bootloader.hex")
+  lines.append(f"    ${{CMAKE_CURRENT_BINARY_DIR}}/app.hex")
+  lines.append(f"  DEPENDS {project}_bootloader.elf {project}_app.elf")
+  lines.append(f"  COMMENT \"合并 bootloader + app → {project}_merged.hex\"")
+  lines.append(")")
+  lines.append("")
+  return lines
+
+
 def cmd_gen(root, project_yaml, out_dir):
   """gen：读 project.yaml → 解析依赖 → 生成 CMakeLists / 依赖汇总头 / board_init 骨架。"""
   py_path = (root / project_yaml).resolve()
@@ -355,6 +464,7 @@ def cmd_gen(root, project_yaml, out_dir):
 
   project = str(raw.get("project") or "").strip() or py_path.stem
   mcu = str(raw.get("mcu") or "").strip()
+  boot_cfg = raw.get("bootloader") or {}   # bootloader.enable → 双固件模式
   seed_refs = _as_list(raw.get("modules"))
   if not seed_refs:
     raise ScaffoldError(f"{py_path}: 缺少 modules 列表")
@@ -378,27 +488,7 @@ def cmd_gen(root, project_yaml, out_dir):
         include_dirs.append(m.rel_dir(root))
 
   # ---- 1. CMakeLists.txt ----
-  cm = []
-  cm.append("# 自动生成 — 不要手动编辑（由 YmaC/scaffold.py gen 生成）")
-  cm.append(f"# 项目: {project}")
-  if mcu:
-    cm.append(f"# MCU:  {mcu}")
-  cm.append(f"# 模块: {len(modules)} / 源文件: {len(sources)} / include 路径: {len(include_dirs)}")
-  cm.append("")
-  cm.append(f"add_library({project} STATIC")
-  if sources:
-    cm.extend(f"  {s}" for s in sources)
-  else:
-    cm.append("  # 无 .c 源文件")
-  cm.append(")")
-  cm.append("")
-  cm.append(f"target_include_directories({project} PUBLIC")
-  if include_dirs:
-    cm.extend(f"  {d}" for d in include_dirs)
-  else:
-    cm.append("  # 无 include 路径")
-  cm.append(")")
-  cm.append("")
+  cm = _render_cmake(root, out, project, mcu, sources, include_dirs, boot_cfg, len(modules))
   (out / "CMakeLists.txt").write_text("\n".join(cm), encoding="utf-8", newline="\n")
 
   # ---- 2. <project>_deps.h ----

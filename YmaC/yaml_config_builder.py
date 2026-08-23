@@ -880,6 +880,10 @@ def _build_gui() -> int:
 
             # 操作按钮
             btn_row = QHBoxLayout()
+            self._chk_gen_bootloader = QCheckBox("Bootloader(双固件+OTA)")
+            self._chk_gen_bootloader.setToolTip("勾选 → 生成 bootloader_main + 双固件 CMake（scaffold 双 target + merge_firmware 合并单 .hex）")
+            btn_row.addWidget(self._chk_gen_bootloader)
+
             self._btn_gen = QPushButton("⚒ 生成工程")
             self._btn_gen.setToolTip("仅 status=ready 的拓扑可生成工程")
             self._btn_gen.clicked.connect(self._on_topo_generate)
@@ -1376,12 +1380,24 @@ def _build_gui() -> int:
                 return
 
             # 1. 合成 Config/projects/<name>.yaml
+            gen_bl = self._chk_gen_bootloader.isChecked() if hasattr(self, "_chk_gen_bootloader") else False
             proj_yaml = {
                 "project": name,
                 "mcu": mcu,
                 "description": topo.get("description") or f"{topo.get('display', name)} 工程",
                 "modules": modules,
             }
+            if gen_bl:
+                # 双固件: 拓扑 bootloader 段 → 在 project.yaml 显式声明
+                # 注意: flash_map 键用拓扑 bootloader.mcu (buck.yaml: stm32f334), 回退 GUI mcu 小写
+                topo_bl = topo.get("bootloader") or {}
+                bl_mcu = str(topo_bl.get("mcu") or "").strip() or mcu.lower()
+                proj_yaml["bootloader"] = {
+                    "enable": True,
+                    "mcu": bl_mcu,
+                    "up_port": str(topo_bl.get("up_port") or "uart"),
+                    "flash_dir": str(topo_bl.get("flash_dir") or "."),
+                }
             proj_path = root / "Config" / "projects" / f"{name}.yaml"
             try:
                 proj_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1425,6 +1441,33 @@ def _build_gui() -> int:
                 self._log_msg(f"✗ 物化 App 模板失败: {exc}")
                 QMessageBox.critical(self, "物化失败", str(exc))
                 return
+
+            # 3b. Bootloader（勾选 → flash_map 分区 + bootloader_main 物化 + 合并提示）
+            if gen_bl:
+                # proj_yaml["bootloader"] 已确认 'enable:true' + 正确的 flash_map 键 (bl_mcu)
+                bl_map = proj_yaml.get("bootloader") or {}
+                try:
+                    # flash_map_gen: 生成 bsp_flash_map.h + bootloader_flash.ld/app_flash.ld → gen_dir
+                    import flash_map_gen
+                    fm_ret = flash_map_gen.cmd_gen(
+                        root, root / "Config" / "flash_map.yaml",
+                        bl_map.get("mcu", mcu.lower()), gen_dir)
+                    if fm_ret != 0:
+                        self._log_msg("✗ flash_map_gen 返回非零，分区未生成")
+                        QMessageBox.critical(self, "flash_map 生成失败", "flash_map_gen 未生成分区/链接脚本")
+                        return
+                    # gen_bootloader: 物化 bootloader_main.c/h → gen_dir (复用 gen_app)
+                    #   topo 覆盖为合成的 bootloader 配置 (enable:true 强制), 否则 buck 的 enable:false 会跳过填充
+                    from gen_app import gen_bootloader
+                    gbl_periph = {"platform": "stm32", "peripherals": {"hrtim": [], "adc": [], "can": []}}
+                    gbl_topo = dict(topo)
+                    gbl_topo["bootloader"] = bl_map
+                    gbl = gen_bootloader(gbl_topo, gbl_periph, root, gen_dir)
+                    self._log_msg(f"✓ Bootloader 生成: {gbl['bl_c']} + {gbl['bl_h']}")
+                except Exception as exc:
+                    self._log_msg(f"✗ Bootloader 生成失败: {exc}")
+                    QMessageBox.critical(self, "Bootloader 生成失败", str(exc))
+                    return
 
             # 4. 刷新 Tab1 注入目标 → 指向新物化副本
             self._target_file = gen_dir / "app_main.c"
