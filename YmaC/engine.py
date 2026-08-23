@@ -133,6 +133,43 @@ def ensure_hardc_dir(root: Path, log: LogFn, no_submodule: bool = False,
 
 # ======== 构建 ========
 
+def _run_capture(cmd: list[str], log: LogFn, what: str, timeout: int = 600) -> bool:
+    """流式跑 cmake: 实时把每行打到 logger(CLI=stdout, GUI=日志面板),
+    同时保留尾部供失败回显. 返回是否成功."""
+    import collections
+    tail: "collections.deque[str]" = collections.deque(maxlen=200)
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            bufsize=1, timeout=timeout)
+        for line in proc.stdout:
+            line = line.rstrip()
+            tail.append(line)
+            if line:
+                log("info", line)
+        proc.wait(timeout=timeout)
+        if proc.returncode != 0:
+            log("fail", f"{what} 失败 (退出码 {proc.returncode}), 末尾输出如下:")
+            for l in list(tail)[-40:]:
+                log("info", "  | " + l)
+            log("warn", "如需完整日志: 在工程根手动执行 "
+                        "cmake --preset Debug && cmake --build --preset Debug")
+            return False
+        return True
+    except FileNotFoundError:
+        log("warn", "cmake 不可用, 跳过构建")
+        return True
+    except subprocess.TimeoutExpired:
+        log("fail", f"{what} 超时 ({timeout}s)")
+        for l in list(tail)[-20:]:
+            log("info", "  | " + l)
+        return False
+    except OSError as exc:
+        log("fail", f"{what} 无法启动: {exc}")
+        return False
+
+
 def run_build(root: Path, log: LogFn, toolchain_file: Optional[Path] = None) -> bool:
     if not (root / "CMakeLists.txt").is_file():
         log("warn", "无 CMakeLists.txt, 跳过构建")
@@ -142,33 +179,21 @@ def run_build(root: Path, log: LogFn, toolchain_file: Optional[Path] = None) -> 
         return True
     build_dir = root / "build"
     cached_cfg = (build_dir / "CMakeCache.txt").is_file()
-    if cached_cfg:
-        # 已有缓存: 复用既有生成器 (可能是用户手工配好的 NMake/VS/Ninja),
-        # 不重配避免 "generator does not match" 失败; 直接 make/build.
-        cfg = None
-    else:
-        # 全新 configure: 显式 Ninja (Windows 默认 NMake 常缺失), + 可选工具链
-        cfg = ["cmake", "-S", str(root), "-B", str(build_dir), "-G", "Ninja"]
+    cfg = None
+    if not cached_cfg:
+        # 已有缓存: 复用既有生成器, 避免 "generator does not match".
         if toolchain_file:
-            cfg += ["-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain_file)]
-    try:
-        if cfg is not None:
-            r = subprocess.run(cfg, capture_output=True, text=True, timeout=600)
-            if r.returncode != 0:
-                log("fail", f"cmake configure 失败:\n{r.stderr[-1500:]}")
-                return False
-        r = subprocess.run(["cmake", "--build", str(build_dir)],
-                           capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            log("fail", f"cmake build 失败:\n{r.stderr[-1500:]}")
+            # 无缓存但给了工具链: 显式 Ninja + 工具链(避免 Windows 默认 NMake / 主机编译器)
+            cfg = ["cmake", "-S", str(root), "-B", str(build_dir),
+                   "-G", "Ninja", "-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain_file)]
+        else:
+            cfg = ["cmake", "-S", str(root), "-B", str(build_dir), "-G", "Ninja"]
+    if cfg is not None:
+        if not _run_capture(cfg, log, "cmake configure"):
             return False
-        return True
-    except FileNotFoundError:
-        log("warn", "cmake 不可用, 跳过构建")
-        return True
-    except subprocess.TimeoutExpired:
-        log("fail", "构建超时 (600s)")
+    if not _run_capture(["cmake", "--build", str(build_dir)], log, "cmake build"):
         return False
+    return True
 
 
 # ======== C2000 SDK 探测 (C2000_SDK_DIR) ========
@@ -323,7 +348,7 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
                 out["built"] = True
             else:
                 raise PipelineError("构建失败")
-        elif run_build(root, logger):
+        elif run_build(root, logger, hardc / "cmake" / "starm-clang.cmake"):
             logger("pass", "构建通过")
             out["built"] = True
         else:

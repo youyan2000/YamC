@@ -94,7 +94,11 @@ def _build_block(hardc_rel: str, driver: str, devices: list[str],
         lines.append(f'set(C2000_SDK_DIR "{sdk_dir.replace(chr(92), "/")}")')
     lines.append("include(${HARDC_DIR}/cmake/HardC.CMake)")
     lines.append(f"target_sources(${{CMAKE_PROJECT_NAME}} PRIVATE {app_rel})")
-    lines.append("target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE hardc)")
+    # 用 plain 签名 (无 PRIVATE): CubeMX 工程清单 target_link_libraries
+    #   (${{CMAKE_PROJECT_NAME}} stm32cubemx) 是 plain, 同一 target 混用
+    #   plain+keyword 会让 CMake 报 "must be either all-keyword or all-plain".
+    #   hardc → stm32cubemx 是 PUBLIC, 无显式 scope 仍能传递 resolved deps.
+    lines.append("target_link_libraries(${CMAKE_PROJECT_NAME} hardc)")
     # 三档中断宏 (由 .ioc NVIC 探测): FAST_CTRL_IRQN/SLOW_CTRL_IRQN/HMI_IRQN
     irq = irq_macros or {}
     for macro in ("FAST_CTRL_IRQN", "SLOW_CTRL_IRQN", "HMI_IRQN"):
