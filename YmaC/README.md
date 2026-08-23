@@ -1,351 +1,228 @@
-# YAML Config Builder — 使用说明 & 格式规范
+# YmaC 使用说明
 
-## 概述
+**YmaC = HardC 的配置与接入工具链**（YAML → C 注入 + 拓扑生成 + 外部 CubeMX 工程接入 + 双固件/OTA 编排）。
 
-**YAML Config Builder** 是一个通用的 YAML → C 代码配置注入工具。它将 `conf/` 目录中的 YAML 配置文件渲染为 C designated initializer（指定初始化器），并自动注入目标 C 文件中的标记区域。
+一个工具链，三种干活方式：
 
-- **跨平台**：Windows / Debian Linux
-- **原生暗黑模式**：自动跟随系统主题
-- **依赖**：`pip install PyQt6 pyyaml darkdetect`
+| 方式 | 入口 | 适合 |
+|------|------|------|
+| **GUI** | `python YmaC/yaml_config_builder.py` | 想点按钮、看反馈、在工程目录内做骨架/调参 |
+| **CLI 流水线** | `python YmaC/ymac_cfg.py -d <工程> --topology buck` | 一键把 HardC 接入**真实 CubeMX 工程**（含三宏注入 + 编译） |
+| **CLI 单体命令** | `scaffold.py` / `flash_map_gen.py` / `merge_firmware.py` | 脚本化 / 与 GUI Tab4 逐项对应 |
 
-## 快速入门
-
-### 1. 目录结构
-
-将你的项目组织为以下结构：
-
-```
-<项目根目录>/
-  conf/                         ← 存放 YAML 配置变体
-    device_a.yaml
-    device_b.yaml
-    ...
-  User/
-    app/
-      app_main.c                ← 注入目标（需含标记对）
-```
-
-工具启动时自动从当前目录向上搜索 `conf/` 和 `User/app/app_main.c`，定位项目根目录。
-
-### 2. 在 C 文件中添加标记
-
-在需要注入配置的 C 文件中插入标记对：
-
-```c
-void App_Init(void) {
-    ConfigParam param = {
-        /* CONFIG BEGIN */
-        /* CONFIG END */
-    };
-}
-```
-
-> **重要**：标记对必须成对出现，且只能出现一对。工具会替换两个标记之间的**全部内容**。
-
-### 3. 编写 YAML 配置文件
-
-在 `conf/` 目录下创建 `.yaml` 文件：
-
-```yaml
-config_id: device_a              # 必填：配置标识符（会和文件名一同显示在列表中）
-description: 设备 A 的标定参数    # 可选：配置描述
-
-config:                          # 必填：配置数据（任意嵌套）
-  sampler:
-    vaside:
-      adc_channel: BSP_ADC_VA   # 枚举/宏标识符
-      k: 0.0072475795            # 浮点数
-      b: 0.0216226430
-      cutoff_freq: 250.0
-    vbside:
-      adc_channel: BSP_ADC_VB
-      k: 0.0071909501
-      b: 0.0158060932
-      cutoff_freq: 250.0
-  power:
-    max_voltage: 28.8
-    min_voltage: 6.3
-    pid_gains:
-      kp: 0.12
-      ki: 3.9
-      kd: 0.0
-```
-
-### 4. 运行工具
-
-#### Linux（Debian / Ubuntu）
-
-**初次使用（只需做一次）：**
-
-```bash
-# 1. 创建虚拟环境（项目根目录下）
-python3 -m venv .venv
-
-# 2. 安装依赖
-.venv/bin/pip install PyQt6 pyyaml darkdetect
-```
-
-> 如果 PyPI 官方源下载慢，可以加 `-i https://pypi.tuna.tsinghua.edu.cn/simple` 换清华镜像。
-
-**日常使用：**
-
-```bash
-cd <项目根目录>
-.venv/bin/python YmaC/yaml_config_builder.py
-```
-
-#### Windows
-
-**初次使用（只需做一次）：**
-
-```powershell
-pip install PyQt6 pyyaml darkdetect
-```
-
-**日常使用：**
-
-```powershell
-cd <项目根目录>
-python YmaC\yaml_config_builder.py
-```
-
-### 5. 操作流程
-
-1. 启动工具 → 自动扫描 `conf/` 并显示所有配置变体
-2. 从左侧列表中**选择目标设备**
-3. 右侧预览 C 代码 → 确认无误
-4. 点击 **"应用选中配置"** → 注入 `User/app/app_main.c`
-5. 点击 **"编译"** → 自动调用 CMake 构建
+本文件按"入门 → GUI → CLI → 真实工程教程 → 排查"组织。与 CLI 完全等价的 GUI 按钮都在 **Tab4「工具 (CLI)」**。
 
 ---
 
-## YAML 格式规范
-
-### 顶层字段
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `config_id` | `str` | ✅ | 配置标识符，如 `hero`、`infantry_I` |
-| `description` | `str` | 否 | 配置描述，显示在 GUI 详情区 |
-| `config` | `dict` | ✅ | 配置数据树，渲染为 C 代码的核心内容 |
-
-### YAML → C 类型映射规则
-
-| YAML 类型 | C 输出 | 示例 |
-|-----------|--------|------|
-| 全大写字符串 `BSP_ADC_VA` | 裸标识符 | `BSP_ADC_VA` |
-| 普通字符串 | C 字符串字面量 | `"hello"` |
-| `int` | C 整数 | `42` |
-| `float` | C float 字面量 | `0.0072475795f` |
-| `float` (负数) | 括号包裹 | `(-0.0676202320f)` |
-| `bool` (`true`/`false`) | C99 bool | `true` / `false` |
-| `dict` | designated initializer | `.key = { .sub = val }` |
-| `list` | C 数组初始化器 | `{ 1, 2, 3 }` |
-
-### 嵌套 dict 渲染规则
-
-```yaml
-config:
-  vaside:
-    adc_channel: BSP_ADC_VA
-    k: 0.0072475795
-```
-
-渲染为：
-
-```c
-.vaside = {
-    .adc_channel = BSP_ADC_VA,
-    .k = 0.0072475795f,
-}
-```
-
-顶层 `config:` 的每个 key 展开为一个独立的 C designated initializer 条目。
-
-### 注意事项
-
-1. **浮点精度**：所有 float 渲染为 `.10f` 格式（小数点后 10 位）
-2. **枚举/宏检测**：仅当字符串**全大写且只含字母数字下划线**时被识别为 C 标识符，否则加双引号作为字符串处理
-3. **文件编码**：YAML 和目标 C 文件均使用 UTF-8
-4. **标记唯一性**：每个目标文件中 `/* CONFIG BEGIN */` 和 `/* CONFIG END */` 必须只出现一次
-
----
-
-## 构建系统支持
-
-工具自动检测以下构建系统：
-
-- **CMake**：检测 `build/*/CMakeCache.txt`
-
-编译前如果检测到当前选中的配置与目标文件中已注入的不一致，会提示是否先应用再编译。
-
----
-
-## 命令行替代
-
-如果不想使用 GUI，也可以直接用 Python 脚本注入：
+## 0. 安装与依赖
 
 ```bash
-# Linux: 用 .venv/bin/python，Windows: 用 .venv\Scripts\python
-.venv/bin/python -c "
-from pathlib import Path
-import yaml
-from tools.yaml_config_builder import render_config_block, inject_config
-
-cfg = yaml.safe_load(open('conf/hero.yaml'))
-rendered = render_config_block(cfg['config'])
-inject_config(Path('User/app/app_main.c'), rendered, cfg['config_id'])
-print('Done')
-"
+pip install pyyaml            # 必需（所有脚本）
+pip install PyQt6 darkdetect  # GUI 必需
+pip install pyserial          # Tab3 运行时调参（可选，缺了只是 Tab3 不可用）
 ```
+
+编译需要 `cmake`（建议 `-G Ninja`），STM32 需 [`starm-clang`](https://www.st.com/) 工具链，C2000 需 `cl2000`/`C2000Ware`。见下文「工具链」一节。
 
 ---
 
-## scaffold.py — 工程骨架生成工具
+## 1. 你真的用哪一种？
 
-> 目录分组表、MANIFEST schema 与工具规格的完整设计见 [docs/PLAN.md](../docs/PLAN.md)。
-> 依赖仅需 `pyyaml`（不需要 PyQt6）。
+YmaC 处理两种项目形态，先分清，后面的教程才不会走错目录：
 
-`scaffold.py` 与 `yaml_config_builder.py` 互补：后者把参数 YAML 注入 `app_main.c` 的 CONFIG 标记区；前者从工程 YAML 起步，自动解析依赖、生成构建文件与 App 骨架。
+- **仓库内骨架工程（HardC 根就是工程）**：用 GUI Tab2，产出在 `build/gen/<name>/`，不碰外部 CubeMX。适合练手 / 快速看拓扑生成。
+- **真实 CubeMX 工程（外部，`*.ioc`）**：用 CLI `ymac_cfg.py`（或 GUI「外部工程接入」），把 HardC 以 submodule 接进去、注入 CMake + 三宏、编译真实固件。**这是最终交付形态。**
 
-### 1. 从工程 YAML 起步
+> 三档中断宏 `FAST_CTRL_IRQN / SLOW_CTRL_IRQN / HMI_IRQN`：工具能**从 `.ioc` 的 NVIC 自动探测**并注入 CMake（无需你手填）。探测不到时会在日志 WARN，需手工定义。名义必须遵循 **FAST > SLOW > HMI** 三档（`bsp_irq_apply` 强制，配错会停机），见 `docs/coding/protection-hmi.md`。
 
-新项目在 `Config/projects/<project>.yaml` 声明式列出需要的子系统：
+---
 
-```yaml
-# Config/projects/acdc_sixswitch.yaml
-project: acdc_sixswitch
-mcu: STM32F334R8
-modules:
-  - components/pwm
-  - components/dsp
-  - components/power
-  - components/math
-  - devices/pwm
-  - devices/adc
-  - module/power
-```
+## 2. GUI 使用（Tab1–Tab4）
 
-### 2. 三个子命令
+启动（在仓库根或工程根）：
 
 ```bash
-# 校验全部 MANIFEST（结构 + 依赖合法性）
+python YmaC/yaml_config_builder.py
+```
+
+### Tab1「参数注入」
+- 自动发现配置变体（HardC 工程读 `Config/params/*.yaml`；legacy 工程读 `conf/*.yaml`）。
+- 选变体 → 预览 → 注入到物化的 `app_main.c`（`/* CONFIG BEGIN */`…`/* CONFIG END */` 之间）→ 编译。
+- 先确认顶部显示的项目根正确，再操作。
+
+### Tab2「拓扑选择」
+1. 左侧列出 `Config/topologies/*.yaml`。**只有 `status: ready` 的拓扑能生成**（当前 ready：`buck`、`supercap_3ph`；其余为 `planned` 只读预览）。
+2. 填工程名 / MCU / 变体名。
+3. 参数表按该拓扑 `params:` schema 动态生成（`QDoubleSpinBox`），改完点「写入参数」→ 写 `Config/params/<name>_<variant>.yaml`。
+4. 勾选「Bootloader(双固件+OTA)」→ 生成会带上 `bootloader_main` + 双固件 CMake（bootloader/app 两个 target + `merge_firmware` 合并为单一烧录 `.hex`）。
+5. 「⚒ 生成工程」→ scaffold 写出 `build/gen/<name>/`（CMakeLists + 依赖汇总头 + board_init 骨架）。
+6. 「⟳ 注入 App」→ 物化 `build/gen/<name>/app_main.c`。
+7. 「⚙ 编译」→ 用 **Ninja + starm-clang 工具链**（配置时自动定位 `cmake/starm-clang.cmake`）编译。
+
+**外部工程接入（Tab2 底部 group）：**
+- 填/浏览工程根（含 `.ioc`）→ 「探测」确认平台 → 勾 skip 选项 → 「▶ 运行完整接入」。这个按钮跑的就是 `ymac_cfg` 的**同一条流水线**（engine 后台线程），输出进日志。
+
+### Tab3「运行时调参」
+- 串口 0xFB 帧下发（48 字节，PID 调参协议，与离线 `params.slot` 同源）。需 `pip install pyserial`，缺了此 Tab 会提示且不可用。
+
+### Tab4「工具 (CLI)」— GUI ≅ CLI 功能对齐
+这里的每个按钮**直接以子进程调用对应 CLI 脚本本体**，因此 GUI 与命令行 `--help` 列出的命令完全等价，输出回显到下方日志：
+
+| 按钮 | 等价 CLI |
+|------|----------|
+| scaffold scan | `python YmaC/scaffold.py scan` |
+| scaffold gen | `python YmaC/scaffold.py gen <Config/projects/xxx.yaml>`（逐个跑当前工程） |
+| scaffold deps <module_id> | `python YmaC/scaffold.py deps <module_id>` |
+| flash_map list / show / gen | `python YmaC/flash_map_gen.py list / show / gen` |
+| merge selftest / merge / info | `python YmaC/merge_firmware.py selftest / merge … / info <hex>` |
+
+> 若在外部工程里开 GUI（非 HardC 根），Tab4 需在「工具运行根(HardC 仓库)」填 HardC 仓库根，否则 `find_repo_root` 找不到 `Config/`。
+
+---
+
+## 3. CLI 单体命令
+
+### 3.1 `scaffold.py` — MANIFEST 扫描 / 依赖解析 / 骨架生成
+
+```bash
+# 校验全部 MANIFEST.yaml（结构 + 依赖合法性）
 python YmaC/scaffold.py scan
 
-# 查看某子系统传递依赖（拓扑排序 BSP→…→App）
-python YmaC/scaffold.py deps components/pwm
+# 查看某模块的传递闭包依赖（拓扑排序 BSP→…→App）
+python YmaC/scaffold.py deps components/pid
+python YmaC/scaffold.py deps module/power
 
 # 从工程配置生成骨架 → build/gen/<project>/
-python YmaC/scaffold.py gen Config/projects/<project>.yaml
+python YmaC/scaffold.py gen Config/projects/buck.yaml
+python YmaC/scaffold.py gen Config/projects/buck.yaml --out build/gen/my_buck
 ```
 
-### 3. 生成产物（`build/gen/<project>/`）
+产物（`build/gen/<project>/`）：`CMakeLists.txt`（闭包全部 .c + include 路径）、`<project>_deps.h`（按层分组依赖头清单）、`board_init_stub.c`（逐模块 `// TODO` 占位）。
 
-| 文件 | 内容 |
-|------|------|
-| `CMakeLists.txt` | 传递闭包内全部 .c 源文件 + 各层 include 路径（扁平 `#include` 无需改动） |
-| `<project>_deps.h` | 按层分组的依赖头文件清单 |
-| `board_init_stub.c` | 每模块 `// TODO: <文件> 在此实例化` 占位，App 层填入真实初始化 |
+### 3.2 `flash_map_gen.py` — Flash 分区 → `bsp_flash_map.h` + 链接脚本
 
-### 4. 工作流
+```bash
+python YmaC/flash_map_gen.py list                      # 列出 flash_map.yaml 全部 MCU 与分区概况
+python YmaC/flash_map_gen.py show --mcu stm32f334     # 展示某 MCU 完整解析分区
+python YmaC/flash_map_gen.py gen --mcu stm32f334      # 生成 bsp_flash_map.h + bootloader/app 两个 .ld
+python YmaC/flash_map_gen.py gen --out build/gen/x     # 自定输出目录
+```
 
-1. 创建 `Config/projects/<project>.yaml` 声明需要的子系统
-2. 运行 `scaffold.py gen` 生成骨架到 `build/gen/<project>/`
-3. 在 `board_init_stub.c` 填入真实初始化（Device init → Module init → 指针注入 → ISR 启动）
-4. 参数注入仍走 `yaml_config_builder.py`：手写默认值 → `Config/params/<variant>.yaml` → 注入 → `apply_config()` 同步
+数据真相在 `Config/flash_map.yaml`（分区 = bootloader / app / param…）。双固件/OTA 的 Flash 骨架由此生成。
+
+### 3.3 `merge_firmware.py` — Intel HEX 合并 / 信息 / 自检
+
+```bash
+# 合并多个 hex 为一个（bootloader.hex + app.hex → 单一烧录映像）
+python YmaC/merge_firmware.py merge bootloader.hex app.hex -o merged.hex
+
+# 查看单个 hex 的地址范围 / 段
+python YmaC/merge_firmware.py info build/gen/buck/build/app.hex
+
+# 内置往返自检
+python YmaC/merge_firmware.py selftest
+```
+
+纯标准库实现，无第三方。`--overlap` 可选 `error`（默认，重叠即报错）/ `over`（后写覆盖）。这是把**双固件合并成单一 `.hex` 一次烧录**的落地者。
 
 ---
 
-## YmaC GUI — 使用与验收指南（拓扑选择器）
+## 4. CLI 流水线：接入真实 CubeMX 工程（端到端）
 
-YmaC 也是**拓扑选择器**：选拓扑 → 一键生成该拓扑的工程骨架（采样 + 环路控制 + PWM 输出集成到一个控制 Module，放入 App 层）→ 离线/在线调参。选完后你只需做两件事：在 App 层接外部 I/O（采样输入 / PWM 输出 / HMI）+ 用 YmaC 调参。
-
-### 1. 启动
+**这是把 HardC 接进你自己的 STM32/C2000 工程的正道。** 对标 `xr_cubemx_cfg`，一键完成：HardC submodule 接入 → `.ioc` 解析 → App 生成 → CMake 注入（含三档中断宏）→ 编译。
 
 ```bash
-# Windows（项目根目录）
-python YmaC\yaml_config_builder.py
-
-# Linux（建议 venv）
-.venv/bin/python YmaC/yaml_config_builder.py
+python YmaC/ymac_cfg.py -d <工程根> --topology buck
 ```
 
-- **依赖**：`pip install PyQt6 pyyaml darkdetect`；运行时调参（Tab3）另需 `pip install pyserial`（未装则 Tab3 显示提示并禁用控件，不影响 Tab1/Tab2）。
-- **工作目录**：从项目根目录或任意子目录启动均可 —— 工具向上搜索 `Config/` + `App/` 定位 HardC 工程根。
-- 无 GUI 环境时可用 CLI：`python YmaC/yaml_config_builder.py --cli default`（列出 `Config/params` 变体并注入；无物化副本时提示"需先在 GUI 生成工程"）。
+常用开关：
 
-### 2. 界面三 Tab 总览
-
-| Tab | 功能 | 关键点 |
-|-----|------|--------|
-| **Tab1 参数注入** | 既有注入流程（列表选变体 → 预览 → 应用 → 编译） | 发现逻辑**双模式**：legacy（`conf/` + `User/app/`）或 HardC（`Config/params/` + 物化 `build/gen/*/app_main.c`） |
-| **Tab2 拓扑选择** | 选拓扑 → 生成工程 → 参数表 → 写参 → 注入 → 编译 | **主验收路径**，见下节 |
-| **Tab3 运行时调参** | 串口 0xFB 帧下发（复用 `App/pid_tune.h` 协议） | 依赖 `pyserial`；槽位与 Tab2 参数表同源 |
-
-### 3. 验收走查（Tab2 主流程）
-
-> 当前 **buck 是唯一 `ready` 拓扑**（控制模块已实现），其余 9 个是 `planned` 占位。走查以 buck 为例。
-
-1. **启动 GUI** → 默认停在 Tab1。
-2. **切到 Tab2「拓扑选择」**。
-3. **左侧列表**应显示 10 个拓扑：buck 标"状态: ready"，其余标"(待实现)"。选中 planned 条目时「生成工程」按钮**禁用**，选中 buck 时**可用** —— 这是第一个验收点。
-4. **选中 buck** → 右侧显示详情（描述 / 控制模块 `module/power/mod_buck` / 模块数 / 参数数 10）。
-5. **填工程名**（如 `my_buck`）+ **MCU**（可编辑下拉框，如 `STM32F334R8`）+ **变体名**（如 `default`）。
-6. 点**「生成工程」**。验收点：
-   - A. 日志出现 `✓ 工程 [my_buck] 生成完成`；
-   - B. `Config/projects/my_buck.yaml` 已生成（由拓扑 `modules:` 合成）；
-   - C. `build/gen/my_buck/` 含 `CMakeLists.txt` + `my_buck_deps.h` + `board_init_stub.c` + **物化的 `app_main.c`/`.h`**（模板拷贝，模板本身不被污染）；
-   - D. Tab1 顶部"当前注入"更新为指向物化副本。
-7. **参数表**：渲染出 10 个 `QDoubleSpinBox`（带 min/max/unit，悬停显示 slot 号）。改几个值（如 vref=13）。
-8. 点**「写入参数」** → 生成 `Config/params/my_buck_default.yaml`（dotted key 如 `pid_v.kp` 已展开为嵌套 dict）。
-9. 点**「注入 App」** → 日志 `配置 [my_buck_default] 已注入 build/gen/my_buck/app_main.c`。**验收点**：打开该文件，CONFIG 区内应是一个 **`.power = { … }` 嵌套块**，同时含 10 个槽位字段和 **非槽位字段**（`ch_drive`/`duty_min`/`duty_max`/`adc_ch_vout`/`adc_ch_iout`/`adc_ch_vin`），值与你编辑的/默认的一致。
-10. 点**「编译」** → 复用现有 CMake（需已装工具链 + `cmake`，workdir 指 `build/gen/my_buck/`）。
-11. **回 Tab1 复验**：左侧列表应出现 `my_buck_default` 变体 → 选中 → 右侧预览显示同样的 `.power` 块 → 「应用选中配置」再次注入物化副本。
-
-### 4. Tab1 参数注入（双模式）
-
-- **legacy**：发现 `conf/*.yaml` + `User/app|Application/app_main.c`，行为与旧版一致。
-- **HardC**：发现 `Config/params/*.yaml`；注入目标**优先取物化的 `build/gen/<name>/app_main.c`**（按 mtime 取最近副本），找不到再退回 legacy 扫描。
-- 两套 schema 相同（`config_id`/`description`/`config`），无需改逻辑。
-
-### 5. Tab3 运行时调参（0xFB）
-
-1. `pip install pyserial`（未装则本 Tab 禁用）。
-2. 选**串口** + **波特率** → **连接**。
-3. 参数表（与 Tab2 同源）编辑 → **「下发」**。
-4. 帧格式（48 字节，复用 `App/pid_tune.h`）：HEAD=`0x00`、CMD=`0x14`、`Coef[10]`（`<f` 小端 float，对应 `params.slot` 0–9）、CHECK=`π`、末 2 字节=0。
-5. 设备端链路：`App_OnUartRx` → `pid_tune_rx` → 主循环 `pid_tune_respond` → `on_pid_tune_received` → `apply_config()`。
-6. **无硬件验收**：串口回环（或 com0com 虚拟串口）→ 设备端应收到合法帧并触发 apply 回调；离线/在线槽位同源，不漂移。
-
-### 6. 验收检查清单
-
-| 步骤 | 预期产物 | 检查点 |
-|------|----------|--------|
-| Tab2 选拓扑 | buck=ready 可生成；9 个 planned 按钮禁用 | 状态文案 + 按钮可用性 |
-| 生成工程 | `Config/projects/<name>.yaml` + `build/gen/<name>/`（CMakeLists + deps.h + stub + 物化 app_main.c） | 4 个目录/文件 + 模板未被污染 |
-| 写入参数 | `Config/params/<name>_<variant>.yaml` | dotted key 嵌套展开 |
-| 注入 App | 物化 `app_main.c` 的 CONFIG 区 | **`.power = { … }` 嵌套块**含槽位+非槽位全部字段 |
-| 编译 | CMake 产物 | 需要工具链，workdir=`build/gen/<name>/` |
-| Tab1 复验 | 变体出现在列表；预览与 Tab2 一致；可再次注入 | 双模式发现生效 |
-| Tab3 | 0xFB 帧正确拼装/下发 | 回环验收 + 槽位一致 |
-
-### 7. 拓扑目录 `Config/topologies/<topo>.yaml`
-
-每个拓扑一个 YAML（buck / boost / buckboost / forward / flyback / sepic / cuk / zeta / buck2 / vsi_3ph）：
-
-| 字段 | 说明 |
+| 参数 | 含义 |
 |------|------|
-| `status` | `ready`=控制模块已实现可生成工程；`planned`=仅目录占位 |
-| `modules` | scaffold 依赖 seed 列表（与 `projects/<name>.yaml` 的 modules 一致） |
-| `control_module` | 该拓扑的控制模块（如 `module/power/mod_buck`） |
-| `pwm` / `adc` | 建议的 PWM 设备与 ADC 通道角色 |
-| `params` | **调参唯一数据源** —— 每项含 key/type/default/min/max/unit/slot/label，同时驱动 GUI 表单、`Config/params` 写入、0xFB 槽位、C 注入四件事，`slot` 保证离线/在线不漂移 |
-| `tune` | 0xFB 帧参数（frame_len/check_code/slots） |
+| `-d, --dir` | 外部工程根（含 `.ioc` 或 `.syscfg`）；默认 `.` |
+| `--topology` | 拓扑名（`Config/topologies/<name>.yaml`）；默认 `buck` |
+| `--git-source <url>` | HardC git 仓库 URL，**submodule add** 接入 |
+| `--hardc-path <路径>` | 配合 `--no-submodule`：adopt 已有 HardC 目录（不建 submodule） |
+| `--no-submodule` | 不做 submodule（adopt 现有目录），需 `--hardc-path` |
+| `--no-build` | 只生成与集成，跳过构建 |
+| `--params <yaml>` | 参数 YAML（平铺 `{'vref':12.5,'pid_v.kp':2}` 或 `config: {power:{…}}`）|
+| `--sdk-dir` | c2000：C2000Ware/DigitalPower SDK 根（缺省自动探测） |
 
-> **注入域约定**：HardC 注入目标是 `ProjectConfig` 根结构体，拓扑控制域默认挂在 **`.power`** 成员下（如 `.power = { .vref = …, .duty_max = … }`），其余顶层条目会编译失败。可调槽位（`params`）与非槽位字段（`pwm.ch_drive/duty_min/duty_max`、`adc.roles.*.ch`）一并覆盖 —— 否则注入会整体替换模板手写默认值，导致 `duty_max=0` 等运行时损坏。新拓扑的控制模块若挂载到别的 ProjectConfig 成员，改 `_build_config_from_form` 的返回键即可。
+### 4.1 一次性思路（先明白要发生什么）
 
-### 8. 已知边界
+1. 工程必须是 CubeMX 生成的、含 `*.ioc`（STM32）或 `SysConfig` 产物（C2000）。
+2. 工具会把 HardC 作为 **git submodule** 放进 `Middlewares/Third_Party/HardC`（`--no-submodule` 则用你已有目录）。
+3. `.ioc` 被解析成外设 YAML → 生成 `app_main.c`（HRTIM 发波 + ADC 采样 + 控制骨架）。
+4. 往工程 `CMakeLists.txt` 注入一个幂等 `YmaC HardC BEGIN/END` 块：
+   - `set(HARDC_DIR …)` / `set(HARDC_DRIVER st)` / `set(HARDC_DEVICES "…")`
+   - `include(${HARDC_DIR}/cmake/HardC.CMake)`
+   - `target_sources(... app_main.c)` + `target_link_libraries(... hardc)`
+   - `target_compile_definitions(... FAST_CTRL_IRQN=… SLOW_CTRL_IRQN=… HMI_IRQN=…)` — **三宏自动注入**
+5. 编译（starm-clang / cl2000），产出 `.elf`（勾 bootloader 则再合并出单 `.hex`）。
 
-- **仅 buck 可生成工程**；其余 9 个拓扑只建了 catalog 占位，`status: planned`，需后续实现控制模块后改为 `ready`。
-- 运行时**遥测回读（0xFC 帧）未实现**，Tab3 目前只下发不回读。
-- 设备端 0xFB apply 回调（`on_pid_tune_received`）目前是模板里**写死的 Buck 槽位映射**；新增拓扑时需按 `topology.params` 生成槽位→cfg 映射（后续硬化点）。
+### 4.2 示例：接入一个 STM32F334 工程
+
+```bash
+cd <你的_F334_CubeMX工程根>
+python <HardC>/YmaC/ymac_cfg.py -d . --topology buck --git-source https://github.com/youyan2000/HardC.git
+# 成功标志（日志）：
+#   ✓ 生成 app_main.c/h
+#   ✓ CMake 集成: 插入 HardC 块 (series=F3, irq=3)   <- irq=3 表示三宏已注入
+#   ✓ 构建通过
+```
+
+`irq=3` 说明三宏已从 `.ioc` 探测到并注入；若日志是 WARN「未从 .ioc 探测到三档中断宏」，说明 `.ioc` 里 NVIC 没使能该类中断，需回 CubeMX 打开并重跑。
+
+> **三档中断（在 CubeMX 里要配好，工具的探测依赖它）：**
+> - **FAST**：HRTIM 发波定时器中断（如 `HRTIM1_TIMA_IRQn`）
+> - **SLOW**：监控定时器更新中断（如 `TIM1_UP_TIM16_IRQn`）
+> - **HMI**：通信/按键中断（如 `CAN_RX0_IRQn`、`USART2_IRQn`）
+> 探测按名字分类：HRTIM→FAST、TIM*_UP→SLOW、CAN/FDCAN/UART/USART/LPUART→HMI；Cortex 核异常（SysTick/HardFault…）被自动排除。
+
+---
+
+## 5. 引导状态：三种工程接入方式小结（含"别踩的坑"）
+
+| 你要的 | 推荐 | 备注 |
+|--------|------|------|
+| 快速看拓扑生成/骨架 | GUI Tab2，无需外部工程 | 产出在 `build/gen/<name>/` |
+| 接入已有 CubeMX 工程 | CLI `ymac_cfg.py -d . --topology …` | 最常用 |
+| 接入已有 HardC 目录 | CLI `ymac_cfg.py … --no-submodule --hardc-path <dir>` | 不建 submodule |
+
+**红线（曾导致仓库损坏，务必遵守）：**
+- **禁止**用 `mklink /J <同名> <HardC仓库根>` 这类"同名 junction"把源目录重定向成悬空链接——之前因此"仓库全丢"。接入用 **git submodule 或 xcopy 拷贝**。
+- 改了代码就及时 **git commit + push**，别让本地长期挂未提交改动（事故时零兜底）。
+
+---
+
+## 6. 常见问题排查
+
+| 症状 | 原因 / 处理 |
+|------|------------|
+| 编译报 `nmake: no such file or directory` | cmake 用了默认 NMake 生成器。用 `-G Ninja`（YmaC 现默认 Ninja）；确认本机装 Ninja |
+| `cmake` 不在 PATH | 加 `cmake` 的 bin 到 PATH；找不到时 GUI 会弹"cmake 未找到" |
+| `starm-clang: command not found` | 工具链不在 PATH。加 `<stm32cube>\bundles\st-arm-clang\<ver>\bin` 到用户 PATH，重开终端 |
+| `unknown type name 'CAN_HandleTypeDef' / 'SPI_…'` | CubeMX 没使能该 HAL 外设，而 BSP 后端全量编译撞到缺失类型。需按拓扑裁剪：工程里 `set(HARDC_BSP "…")` 只列用到的后端（见 `cmake/HardC.CMake`） |
+| `FAST_CTRL_IRQN / SLOW_CTRL_IRQN / HMI_IRQN` undeclared | 工具没从 `.ioc` 探测到（NVIC 未开对应中断）。回 CubeMX 打开，或手工在工程加三个宏 |
+| `initializer element is not a compile-time constant`（bootloader）| `Module/bootloader` 默认不编，需 `set(HARDC_ENABLE_BOOTLOADER ON)` 才纳入 |
+| `HARDC_DIR` 路径不对 | 注入块首行 `set(HARDC_DIR …)` 应指向真实 submodule 相对路径；外部工程一般是 `Middlewares/Third_Party/HardC` |
+| `target_link_libraries … PRIVATE` 与 CubeMX 冲突 | HardC.CMake 与 CubeMX 链接应兼容 plain 签名；改回 `target_link_libraries(${PROJECT_NAME} hardc)` |
+| 想合并 bootloader+app 成单一 `.hex` | `merge_firmware.py merge bootloader.hex app.hex -o out.hex`，或 GUI Tab2 勾 Bootloader 后由 CMake 自动合并 |
+| GUI Tab3 打不开/不可用 | `pip install pyserial` |
+
+---
+
+## 7. 相关目录 / 文件
+
+| 路径 | 内容 |
+|------|------|
+| `Config/topologies/*.yaml` | 拓扑定义（`status: ready` 才可生成；`params:` schema 驱动参数表） |
+| `Config/projects/*.yaml` | 工程配置（声明式列出需要的子系统） |
+| `Config/params/*.yaml` | 参数变体（`config_id` + `config: {…}`） |
+| `Config/flash_map.yaml` | Flash 分区真相（bootloader/app/param…） |
+| `cmake/HardC.CMake` | 库接入文件（BSP 裁剪 / CORE 裁剪 / 平台链接） |
+| `cmake/starm-clang.cmake` | STM32 starm-clang 工具链文件 |
+| `App/app_main.c.tmpl` | App 层实现模板（含 HMI/OTA 接缝） |
+| `docs/coding/protection-hmi.md` | FAST>SLOW>HMI 三档约定与 `bsp_irq_apply` |
+
+更多使用细节见 [../docs/guides/external-project-integration.md](../docs/guides/external-project-integration.md)。
