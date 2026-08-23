@@ -100,8 +100,10 @@ def _build_block(hardc_rel: str, driver: str, devices: list[str],
     #   hardc → stm32cubemx 是 PUBLIC, 无显式 scope 仍能传递 resolved deps.
     lines.append("target_link_libraries(${CMAKE_PROJECT_NAME} hardc)")
     # 三档中断宏 (由 .ioc NVIC 探测): FAST_CTRL_IRQN/SLOW_CTRL_IRQN/HMI_IRQN
+    #   + 额外 HMI 源 HMI_IRQN_2..4 (多通信源时多个, 全部钉到抢优 2).
     irq = irq_macros or {}
-    for macro in ("FAST_CTRL_IRQN", "SLOW_CTRL_IRQN", "HMI_IRQN"):
+    for macro in ("FAST_CTRL_IRQN", "SLOW_CTRL_IRQN", "HMI_IRQN",
+                  "HMI_IRQN_2", "HMI_IRQN_3", "HMI_IRQN_4"):
         if macro in irq:
             lines.append(f"target_compile_definitions(${{CMAKE_PROJECT_NAME}} "
                          f"PRIVATE {macro}={irq[macro]})")

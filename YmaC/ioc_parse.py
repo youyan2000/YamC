@@ -116,13 +116,21 @@ def probe_irq_macros(root: Path) -> dict[str, str]:
     # HMI: 通信类优先 (CAN/FDCAN/UART/USART/LPUART, 兼容 UART4_5 / USART2 等名),
     #      退而其次剩余任一非核异常 IRQn (排除已选中的 FAST/SLOW).
     used = set(macros.values())
+    # HMI: 通信类 (CAN/FDCAN/UART/USART/LPUART, 兼容 UART4_5 / USART2 等名).
+    #   关键: HMI 可同时有多个来源 (按键EXti / UART / CAN / FDCAN...), 每个都是独立
+    #   中断且都应钉到抢优 2. 这里把所有通信类 IRQn 组成 HMI 组:
+    #     HMI_IRQN     = 第一个 (主 HMI, 驱动 hmi_tick 时基)
+    #     HMI_IRQN_2..4 = 其余 (额外 HMI 源, 由 app_main board_init 登记并共钉到 2)
+    #   无通信类时退而其次剩余任一非核异常 IRQn 作主 HMI.
     comm = [n for n in names if n.startswith(("CAN", "FDCAN", "UART", "USART", "LPUART"))]
-    hmi = next(iter(comm), None)
-    if hmi is None:
+    if comm:
+        macros["HMI_IRQN"] = comm[0] + "_IRQn"
+        for i, extra in enumerate(comm[1:4], start=2):  # HMI_IRQN_2..HMI_IRQN_4 (最多3个副源, 对齐 app_main.tmpl)
+            macros[f"HMI_IRQN_{i}"] = extra + "_IRQn"
+    else:
         rest = [n for n in names if (n + "_IRQn") not in used]
-        hmi = rest[0] if rest else None
-    if hmi:
-        macros["HMI_IRQN"] = hmi + "_IRQn"
+        if rest:
+            macros["HMI_IRQN"] = rest[0] + "_IRQn"
 
     return macros
 

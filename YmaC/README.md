@@ -33,7 +33,7 @@ YmaC 处理两种项目形态，先分清，后面的教程才不会走错目录
 - **仓库内骨架工程（HardC 根就是工程）**：用 GUI Tab2，产出在 `build/gen/<name>/`，不碰外部 CubeMX。适合练手 / 快速看拓扑生成。
 - **真实 CubeMX 工程（外部，`*.ioc`）**：用 CLI `ymac_cfg.py`（或 GUI「外部工程接入」），把 HardC 以 submodule 接进去、注入 CMake + 三宏、编译真实固件。**这是最终交付形态。**
 
-> 三档中断宏 `FAST_CTRL_IRQN / SLOW_CTRL_IRQN / HMI_IRQN`：工具能**从 `.ioc` 的 NVIC 自动探测**并注入 CMake（无需你手填）。探测不到时会在日志 WARN，需手工定义。名义必须遵循 **FAST > SLOW > HMI** 三档（`bsp_irq_apply` 强制，配错会停机），见 `docs/coding/protection-hmi.md`。
+> 三档中断宏 `FAST_CTRL_IRQN / SLOW_CTRL_IRQN / HMI_IRQN`：工具能**从 `.ioc` 的 NVIC 自动探测**并注入 CMake（无需你手填）。**HMI 可同挂多个通信/按键源**（UART + CAN + FDCAN + 按键 EXTI…每个都是独立 IRQn）：工具会把主源填 `HMI_IRQN`、其余源依次填 `HMI_IRQN_2/3/4` 一并注入，`bsp_irq_apply` 把它们统一钉到抢优 2。探测不到时会在日志 WARN，需手工定义。名义必须遵循 **FAST > SLOW > HMI** 三档（`bsp_irq_apply` 强制，配错会停机），见 `docs/coding/protection-hmi.md`。
 
 ---
 
@@ -214,7 +214,6 @@ python <HardC>/YmaC/ymac_cfg.py -d . --topology buck --git-source https://github
 |--------|------|------|
 | 快速看拓扑生成/骨架 | GUI Tab2，无需外部工程 | 产出在 `build/gen/<name>/` |
 | 接入已有 CubeMX 工程 | CLI `ymac_cfg.py -d . --topology …` | 最常用 |
-| 接入已有 HardC 目录 | CLI `ymac_cfg.py … --no-submodule --hardc-path <dir>` | 不建 submodule |
 
 **红线（曾导致仓库损坏，务必遵守）：**
 - **禁止**用 `mklink /J <同名> <HardC仓库根>` 这类"同名 junction"把源目录重定向成悬空链接——之前因此"仓库全丢"。接入用 **git submodule 或 xcopy 拷贝**。
