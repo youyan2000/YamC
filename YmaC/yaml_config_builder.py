@@ -703,6 +703,7 @@ def _build_gui() -> int:
             self._build_tab_inject()
             self._build_tab_topology()
             self._build_tab_runtime()
+            self._build_tab_tools()
             root_layout.addWidget(self._tabs, stretch=1)
 
             log_group = QGroupBox("日志")
@@ -1029,6 +1030,183 @@ def _build_gui() -> int:
 
             self._on_refresh_ports()
 
+        # ═══════════════════════════════════════════════════════════
+        #  Tab4「工具（CLI 等价）」— GUI ≅ CLI 功能对齐
+        #  直接以子进程调用 YmaC 各 CLI 脚本 (scaffold / flash_map_gen /
+        #  merge_firmware) 的 main(), 与终端行为完全一致, 输出进共享日志.
+        # ═══════════════════════════════════════════════════════════
+
+        def _build_tab_tools(self) -> None:
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(6)
+
+            # 运行目录: 优先当前项目根 (HardC 工程含 Config/), 否则工具仓库根
+            tip = QLabel(
+                "以下按钮逐个执行与 CLI 完全相同的脚本 (scaffold.py / flash_map_gen.py / "
+                "merge_firmware.py), 输出回显到下方日志。\n"
+                "工作目录默认取当前项目根; 若在外部工程(非 HardC 根), 需在「工程根」框填 HardC 仓库根。"
+            )
+            tip.setWordWrap(True)
+            tip.setStyleSheet("color: #888; font-size: 12px;")
+            layout.addWidget(tip)
+
+            # 工作目录 (HardC 仓库根, 供 find_repo_root 向上解析 Config/)
+            run_row = QHBoxLayout()
+            run_row.addWidget(QLabel("工具运行根(HardC 仓库):"))
+            self._edit_tools_root = QLineEdit()
+            self._edit_tools_root.setPlaceholderText("默认=当前项目根 (HardC 工程)")
+            run_row.addWidget(self._edit_tools_root, stretch=1)
+            self._btn_tools_browse = QPushButton("浏览…")
+            self._btn_tools_browse.setObjectName("btn_secondary")
+            self._btn_tools_browse.clicked.connect(
+                lambda: self._edit_tools_root.setText(
+                    QFileDialog.getExistingDirectory(self, "选择 HardC 仓库根", self._tools_cwd())))
+            run_row.addWidget(self._btn_tools_browse)
+            layout.addLayout(run_row)
+
+            grp = QGroupBox("scaffold — MANIFEST 扫描 / 依赖解析 / 骨架生成")
+            inner = QVBoxLayout(grp)
+            r1 = QHBoxLayout()
+            b1 = QPushButton("scan (校验全部 MANIFEST)")
+            b1.setObjectName("btn_secondary"); b1.clicked.connect(lambda: self._run_cli_tool(["scaffold.py", "scan"]))
+            r1.addWidget(b1)
+            b2 = QPushButton("gen (生成工程骨架)")
+            b2.setObjectName("btn_secondary"); b2.clicked.connect(self._on_tools_scaffold_gen)
+            r1.addWidget(b2)
+            inner.addLayout(r1)
+            r2 = QHBoxLayout()
+            r2.addWidget(QLabel("依赖模块 id:"))
+            self._edit_deps_id = QLineEdit("components/pid")
+            self._edit_deps_id.setPlaceholderText("如 components/pid, 用 Ctrl+鼠标选主目录")
+            r2.addWidget(self._edit_deps_id, stretch=1)
+            b3 = QPushButton("deps (递归依赖)")
+            b3.setObjectName("btn_secondary"); b3.clicked.connect(self._on_tools_deps)
+            r2.addWidget(b3)
+            inner.addLayout(r2)
+            layout.addWidget(grp)
+
+            grp2 = QGroupBox("flash_map_gen — Flash 分区 → bsp_flash_map.h + 链接脚本")
+            inner2 = QVBoxLayout(grp2)
+            r3 = QHBoxLayout()
+            b4 = QPushButton("list (所有 MCU/分区)")
+            b4.setObjectName("btn_secondary"); b4.clicked.connect(lambda: self._run_cli_tool(["flash_map_gen.py", "list"]))
+            r3.addWidget(b4)
+            b5 = QPushButton("show (MCU 解析)")
+            b5.setObjectName("btn_secondary"); b5.clicked.connect(lambda: self._run_cli_tool(["flash_map_gen.py", "show"]))
+            r3.addWidget(b5)
+            b6 = QPushButton("gen (生成 h + ld)")
+            b6.setObjectName("btn_secondary"); b6.clicked.connect(lambda: self._run_cli_tool(["flash_map_gen.py", "gen"]))
+            r3.addWidget(b6)
+            inner2.addLayout(r3)
+            layout.addWidget(grp2)
+
+            grp3 = QGroupBox("merge_firmware — 双固件合并 / hex 信息 / 自检")
+            inner3 = QVBoxLayout(grp3)
+            r4 = QHBoxLayout()
+            b7 = QPushButton("selftest (内置往返自检)")
+            b7.setObjectName("btn_secondary"); b7.clicked.connect(lambda: self._run_cli_tool(["merge_firmware.py", "selftest"]))
+            r4.addWidget(b7)
+            b8 = QPushButton("merge (bootloader.hex + app.hex)")
+            b8.setObjectName("btn_secondary"); b8.clicked.connect(self._on_tools_merge)
+            r4.addWidget(b8)
+            inner3.addLayout(r4)
+            r5 = QHBoxLayout()
+            r5.addWidget(QLabel("hex 文件:"))
+            self._edit_hex_path = QLineEdit()
+            self._edit_hex_path.setPlaceholderText("选择单个 .hex (用于 info)")
+            r5.addWidget(self._edit_hex_path, stretch=1)
+            b9 = QPushButton("info (地址范围/段)")
+            b9.setObjectName("btn_secondary"); b9.clicked.connect(self._on_tools_hex_info)
+            r5.addWidget(b9)
+            inner3.addLayout(r5)
+            layout.addWidget(grp3)
+
+            layout.addStretch()
+            widget.setLayout(layout)
+            self._tabs.addTab(widget, "工具 (CLI)")
+
+        def _tools_cwd(self) -> str:
+            """优先用框内填的根, 否则当前项目根 (HardC 工程才含 Config/)."""
+            raw = self._edit_tools_root.text().strip() if hasattr(self, "_edit_tools_root") else ""
+            if raw:
+                return raw
+            root = getattr(self, "_project_root", None)
+            if root is not None:
+                return str(root)
+            return os.getcwd()
+
+        def _run_cli_tool(self, argv: list[str]) -> None:
+            """以子进程运行 YmaC 脚本并回显输出到共享日志 (与 CLI 同源)."""
+            cwd = self._tools_cwd()
+            script = Path(__file__).resolve().parent / argv[0]
+            if not script.is_file():
+                self._log_msg(f"✗ 找不到脚本: {script}")
+                return
+            cmd = [sys.executable, str(script)] + argv[1:]
+            self._log_msg(f"$ (cwd={cwd}) {' '.join(cmd)}")
+            try:
+                r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=180)
+            except subprocess.TimeoutExpired:
+                self._log_msg("✗ 工具超时 (180s)")
+                return
+            except OSError as exc:
+                self._log_msg(f"✗ 无法启动: {exc}")
+                return
+            if r.stdout:
+                self._log.insertPlainText(r.stdout)
+            if r.stderr:
+                self._log.insertPlainText(r.stderr)
+            sb = self._log.verticalScrollBar()
+            if sb is not None:
+                sb.setValue(sb.maximum())
+            self._log_msg(f"→ 退出码 {r.returncode}" if r.returncode else "✓ 完成")
+
+        def _on_tools_deps(self) -> None:
+            mid = self._edit_deps_id.text().strip() or "components/pid"
+            self._run_cli_tool(["scaffold.py", "deps", mid])
+
+        def _on_tools_scaffold_gen(self) -> None:
+            # 默认跑当前工程 project（HardC 工程走 build/gen）
+            root = self._project_root
+            if root is None:
+                self._log_msg("✗ 未找到项目根，无法定位 Config/projects/<name>.yaml")
+                return
+            projects = sorted((root / "Config" / "projects").glob("*.yaml")) if (root / "Config" / "projects").is_dir() else []
+            if not projects:
+                self._log_msg("✗ Config/projects/ 下无 project.yaml")
+                return
+            for p in projects:
+                self._run_cli_tool(["scaffold.py", "gen", str(p.relative_to(root))])
+
+        def _on_tools_merge(self) -> None:
+            # 从当前 build/gen/<name>/build 找 bootloader.hex + app.hex
+            root = self._project_root
+            if root is None:
+                self._log_msg("✗ 未找到项目根")
+                return
+            gens = sorted((root / "build" / "gen").glob("*/build/*.hex")) if (root / "build" / "gen").is_dir() else []
+            boot = next((p for p in gens if p.name == "bootloader.hex"), None)
+            app = next((p for p in gens if p.name == "app.hex"), None)
+            if boot is not None and app is not None:
+                out = boot.parent / f"{boot.parent.parent.name}_merged.hex"
+                self._run_cli_tool(["merge_firmware.py", "merge", str(boot), str(app), "-o", str(out)])
+            else:
+                self._log_msg("✗ 未找到已编译的 bootloader.hex + app.hex（请先在 Tab2 勾 Bootloader 并编译）")
+                self._run_cli_tool(["merge_firmware.py", "selftest"])
+
+        def _on_tools_hex_info(self) -> None:
+            p = self._edit_hex_path.text().strip()
+            if not p or not Path(p).is_file():
+                d = QFileDialog.getOpenFileName(self, "选择 .hex", "", "Hex (*.hex)")[0]
+                if not d:
+                    return
+                p = d
+                self._edit_hex_path.setText(p)
+            self._run_cli_tool(["merge_firmware.py", "info", p])
+
         # ── 项目发现 ──────────────────────────────────────
 
         def _discover_project(self) -> None:
@@ -1337,7 +1515,8 @@ def _build_gui() -> int:
                     self._build_process = None
                     return
                 self._log_msg("✓ cmake 配置成功，继续编译")
-                name = self._edit_proj_name.text().strip() or ""
+                name = self._edit_proj_name.text().strip() or \
+                    str(getattr(self, "_current_topo", None) and self._current_topo.get("name") or "project")
                 gen_dir = self._project_root / "build" / "gen" / name
                 build_dir = gen_dir / "build"
                 cmd = [find_cmake() or "cmake", "--build", str(build_dir)]
@@ -1543,6 +1722,21 @@ def _build_gui() -> int:
             else:
                 QMessageBox.critical(self, "注入失败", f"无法写入 {target}。")
 
+        def _find_toolchain_file(self) -> Optional[object]:
+            """定位 HardC 的 starm-clang/gcc 工具链文件，供 GUI 配置骨架工程时传给 CMake。
+            搜索顺序：工程根 cmake/ → HardC submodule cmake/ → 工具链自身仓库 cmake/。"""
+            if self._project_root is None:
+                return None
+            candidates = []
+            if getattr(self, "_is_hardc", False):
+                candidates.append(self._project_root / "cmake" / "starm-clang.cmake")
+            candidates.append(self._project_root / "HardC" / "cmake" / "starm-clang.cmake")
+            candidates.append(Path(__file__).resolve().parent.parent / "cmake" / "starm-clang.cmake")
+            for c in candidates:
+                if c is not None and c.is_file():
+                    return c
+            return None
+
         def _on_topo_build(self) -> None:
             if self._build_process is not None:
                 self._kill_build()
@@ -1564,9 +1758,13 @@ def _build_gui() -> int:
 
             build_dir = gen_dir / "build"
             if not (build_dir / "CMakeCache.txt").is_file():
-                # 未配置 → 先 cmake -S/-B，完成后自动 --build
+                # 未配置 → 先 cmake -S/-B（-G Ninja，避免 Windows 默认 NMake），完成后自动 --build
                 self._topo_build_step = "configure"
-                cmd = [cmake_path, "-S", str(gen_dir), "-B", str(build_dir)]
+                cmd = [cmake_path, "-S", str(gen_dir), "-B", str(build_dir), "-G", "Ninja"]
+                toolchain = self._find_toolchain_file()
+                if toolchain:
+                    cmd += ["-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain)]
+                    self._log_msg(f"工具链: {toolchain}")
             else:
                 self._topo_build_step = "build"
                 cmd = [cmake_path, "--build", str(build_dir)]
