@@ -80,7 +80,8 @@ def series_from_family(family: str) -> str:
 
 def _build_block(hardc_rel: str, driver: str, devices: list[str],
                  app_rel: str, series: Optional[str] = None,
-                 sdk_dir: Optional[str] = None) -> str:
+                 sdk_dir: Optional[str] = None,
+                 irq_macros: Optional[dict] = None) -> str:
     lines = [
         "set(HARDC_DIR  " + hardc_rel + ")",
         f"set(HARDC_DRIVER {driver})",
@@ -94,6 +95,12 @@ def _build_block(hardc_rel: str, driver: str, devices: list[str],
     lines.append("include(${HARDC_DIR}/cmake/HardC.CMake)")
     lines.append(f"target_sources(${{CMAKE_PROJECT_NAME}} PRIVATE {app_rel})")
     lines.append("target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE hardc)")
+    # 三档中断宏 (由 .ioc NVIC 探测): FAST_CTRL_IRQN/SLOW_CTRL_IRQN/HMI_IRQN
+    irq = irq_macros or {}
+    for macro in ("FAST_CTRL_IRQN", "SLOW_CTRL_IRQN", "HMI_IRQN"):
+        if macro in irq:
+            lines.append(f"target_compile_definitions(${{CMAKE_PROJECT_NAME}} "
+                         f"PRIVATE {macro}={irq[macro]})")
     return "\n".join(lines)
 
 
@@ -126,16 +133,18 @@ def read_text_with_fallback(path: str) -> str:
 def inject_cmake_integration(cm_path: Path, hardc_rel: str, driver: str,
                              devices: list[str], app_rel: str,
                              series: Optional[str] = None,
-                             sdk_dir: Optional[str] = None) -> dict:
+                             sdk_dir: Optional[str] = None,
+                             irq_macros: Optional[dict] = None) -> dict:
     """往 CMakeLists.txt 幂等注入 HardC 接入块.
 
-    series: 仅 st (HARDC_STM32_SERIES); sdk_dir: 仅 c2000 (C2000_SDK_DIR).
+    series: 仅 st (HARDC_STM32_SERIES); sdk_dir: 仅 c2000 (C2000_SDK_DIR);
+    irq_macros: {FAST_CTRL_IRQN:.., SLOW_CTRL_IRQN:.., HMI_IRQN:..} 三档中断宏.
     返回 {updated: bool, inserted: bool, old_integration: bool}.
     """
     text = read_text_with_fallback(str(cm_path)) if cm_path.is_file() else ""
     old_integration = _has_old_integration(text)
 
-    block = _build_block(hardc_rel, driver, devices, app_rel, series, sdk_dir)
+    block = _build_block(hardc_rel, driver, devices, app_rel, series, sdk_dir, irq_macros)
     wrapped = f"{BEGIN_MARKER}\n{block}\n{END_MARKER}"
 
     begin_idx = text.find(BEGIN_MARKER)

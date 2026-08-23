@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 from cmake_integrate import compute_devices, inject_cmake_integration, series_from_family
 from gen_app import gen_app, gen_bootloader, load_topology
-from ioc_parse import cache_path_for, load_or_parse
+from ioc_parse import cache_path_for, load_or_parse, probe_irq_macros
 from project_probe import detect_platform, find_ioc, find_project_root
 from c2000_syscfg import cache_path_for as c2_cache_path_for, load_or_parse as c2_load_or_parse
 
@@ -141,14 +141,22 @@ def run_build(root: Path, log: LogFn, toolchain_file: Optional[Path] = None) -> 
         log("warn", "cmake 不在 PATH, 跳过构建")
         return True
     build_dir = root / "build"
-    cfg = ["cmake", "-S", str(root), "-B", str(build_dir)]
-    if toolchain_file:
-        cfg += ["-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain_file)]
+    cached_cfg = (build_dir / "CMakeCache.txt").is_file()
+    if cached_cfg:
+        # 已有缓存: 复用既有生成器 (可能是用户手工配好的 NMake/VS/Ninja),
+        # 不重配避免 "generator does not match" 失败; 直接 make/build.
+        cfg = None
+    else:
+        # 全新 configure: 显式 Ninja (Windows 默认 NMake 常缺失), + 可选工具链
+        cfg = ["cmake", "-S", str(root), "-B", str(build_dir), "-G", "Ninja"]
+        if toolchain_file:
+            cfg += ["-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain_file)]
     try:
-        r = subprocess.run(cfg, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            log("fail", f"cmake configure 失败:\n{r.stderr[-1500:]}")
-            return False
+        if cfg is not None:
+            r = subprocess.run(cfg, capture_output=True, text=True, timeout=600)
+            if r.returncode != 0:
+                log("fail", f"cmake configure 失败:\n{r.stderr[-1500:]}")
+                return False
         r = subprocess.run(["cmake", "--build", str(build_dir)],
                            capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
@@ -283,9 +291,16 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
         extra = ""
         if platform == "stm32":
             series = series_from_family(periph["mcu"].get("family", ""))
+            irq = probe_irq_macros(root)
+            if irq:
+                logger("info", "三档中断宏 (.ioc NVIC 探测): "
+                               + ", ".join(f"{k}={v}" for k, v in irq.items()))
+            else:
+                logger("warn", "未从 .ioc 探测到三档中断宏 — 工程需手工定义 "
+                               "FAST_CTRL_IRQN/SLOW_CTRL_IRQN/HMI_IRQN")
             r = inject_cmake_integration(cm, DEFAULT_HARDC_REL, "st", devices,
-                                         f"{out_rel}/app_main.c", series, None)
-            extra = f"series={series}"
+                                         f"{out_rel}/app_main.c", series, None, irq)
+            extra = f"series={series}" + (f", irq={len(irq)}" if irq else "")
         else:  # c2000
             r = inject_cmake_integration(cm, DEFAULT_HARDC_REL, "c2000", devices,
                                          f"{out_rel}/app_main.c", None, sdk_dir)

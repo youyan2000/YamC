@@ -50,6 +50,83 @@ def extract_peripherals(raw: dict) -> dict:
     return periph
 
 
+def _enabled_irqns(raw: dict) -> list[str]:
+    """.ioc 中已使能 NVIC.*_IRQn 的名字 (顺序稳定)。
+
+    CubeMX 的 NVIC 行是冒号分隔字段, 首字段 'true' 表示已使能, 例如:
+      'NVIC.HRTIM1_TIMA_IRQn=true:0:0:false:false:true:true:true:true'
+    返回去掉 'NVIC.' 前缀与 '_IRQn' 后缀的枚举名: 'HRTIM1_TIMA'.
+    注意: Cortex 核异常 (HardFault/SysTick/... ) 默认也首个为 true, 由调用方
+    按 HRTIM/TIM/CAN/USART 名字分类剔除。
+    """
+    out: list[str] = []
+    for key, val in raw.items():
+        if not key.startswith("NVIC."):
+            continue
+        if not key.endswith("_IRQn"):
+            continue
+        first = str(val).split(":")[0].strip().lower() if val is not None else ""
+        if first != "true":
+            continue
+        out.append(key[len("NVIC."):-len("_IRQn")])
+    return out
+
+
+def probe_irq_macros(root: Path) -> dict[str, str]:
+    """从工程 .ioc 探测三档中断宏 → {FAST_CTRL_IRQN, SLOW_CTRL_IRQN, HMI_IRQN}.
+
+    分类规则 (按 IRQn 名字, 已剔除 Cortex 核异常):
+      FAST = HRTIM*_TIMA (发波定时器, 抢 0) → 退而求其次任一 HRTIM*.
+      SLOW = 非 HRTIM 的 TIM*_UP* (监控定时器, 抢 1), 优先专用 _UP 结尾,
+             其次共享 `_UP_` (TIM1_UP_TIM16), 再退而其次 TIM*_.
+      HMI  = 通信类 (CAN/FDCAN/USART/UART/LPUART, 抢 2), 再退而其次剩余
+             任一非核异常 IRQn.
+    找不到对应位 → 该 key 不存在 (cmake_integrate 输出占位/跳过, 工程需手补).
+    """
+    # Cortex-M 核异常 (默认使能, 永远不是合法 FAST/SLOW/HMI 目标) + 常见调试伪中断
+    _CORE_EXCEPT = {
+        "NonMaskableInt", "HardFault", "MemoryManagement", "BusFault",
+        "UsageFault", "SVCall", "DebugMonitor", "PendSV", "SysTick",
+    }
+
+    macros: dict[str, str] = {}
+    ioc = find_ioc(root)
+    if ioc is None:
+        return macros
+    names = [n for n in _enabled_irqns(_read_ioc(ioc)) if n not in _CORE_EXCEPT]
+    if not names:
+        return macros
+
+    # FAST: HRTIM (优先 *_TIMA, 其次 *_TIM*, 再其次任意 HRTIM*)
+    hrtim = [n for n in names if n.startswith("HRTIM")]
+    fast = next((n for n in hrtim if n.endswith("_TIMA")), None) or \
+        next((n for n in hrtim if "_TIM" in n), None) or (hrtim[0] if hrtim else None)
+    if fast:
+        macros["FAST_CTRL_IRQN"] = fast + "_IRQn"
+
+    # SLOW: 非 HRTIM 的定时器更新中断. 共享名如 TIM1_UP_TIM16_IRQn 含 "_UP_"（
+    #   F334 的 TIM1_UP_TIM16 就是这样名字）, 专用名以 "_UP" 结尾.
+    slow_cands = [n for n in names if n.startswith("TIM") and not n.startswith("HRTIM")]
+    slow = next((n for n in slow_cands if n.endswith("_UP")), None) or \
+        next((n for n in slow_cands if "_UP_" in n), None) or \
+        (slow_cands[0] if slow_cands else None)
+    if slow:
+        macros["SLOW_CTRL_IRQN"] = slow + "_IRQn"
+
+    # HMI: 通信类优先 (CAN/FDCAN/UART/USART/LPUART, 兼容 UART4_5 / USART2 等名),
+    #      退而其次剩余任一非核异常 IRQn (排除已选中的 FAST/SLOW).
+    used = set(macros.values())
+    comm = [n for n in names if n.startswith(("CAN", "FDCAN", "UART", "USART", "LPUART"))]
+    hmi = next(iter(comm), None)
+    if hmi is None:
+        rest = [n for n in names if (n + "_IRQn") not in used]
+        hmi = rest[0] if rest else None
+    if hmi:
+        macros["HMI_IRQN"] = hmi + "_IRQn"
+
+    return macros
+
+
 def _extract_mcu(raw: dict) -> dict:
     subfamily = raw.get("ADC1.SubFamily", "") or raw.get("Mcu.SubFamily", "")
     hclk = _to_int(raw.get("RCC.HCLKFreq_Value")) or 0
