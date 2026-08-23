@@ -8,7 +8,7 @@
 |------|------|------|
 | **GUI** | `python YmaC/yaml_config_builder.py` | 想点按钮、看反馈、在工程目录内做骨架/调参 |
 | **CLI 流水线** | `python YmaC/ymac_cfg.py -d <工程> --topology buck` | 一键把 HardC 接入**真实 CubeMX 工程**（含三宏注入 + 编译） |
-| **CLI 单体命令** | `scaffold.py` / `flash_map_gen.py` / `merge_firmware.py` | 脚本化 / 与 GUI Tab4 逐项对应 |
+| **CLI 单体命令** | `scaffold.py` / `flash_map_gen.py` / `merge_firmware.py` / `ymac_ioc.py` | 脚本化 / 与 GUI Tab4 逐项对应 |
 
 本文件按"入门 → GUI → CLI → 真实工程教程 → 排查"组织。与 CLI 完全等价的 GUI 按钮都在 **Tab4「工具 (CLI)」**。
 
@@ -124,6 +124,33 @@ python YmaC/merge_firmware.py selftest
 ```
 
 纯标准库实现，无第三方。`--overlap` 可选 `error`（默认，重叠即报错）/ `over`（后写覆盖）。这是把**双固件合并成单一 `.hex` 一次烧录**的落地者。
+
+### 3.4 `ymac_ioc.py` — 解析 CubeMX `.ioc` → 外设 YAML + 摘要（对标 `xr_parse_ioc`）
+
+```bash
+python YmaC/ymac_ioc.py -d <工程根>                     # 摘要 + 写 .hardc/<stem>.periph.yaml
+python YmaC/ymac_ioc.py -d <工程根> -o out.yaml        # 自定输出路径
+python YmaC/ymac_ioc.py -d <工程根> --verbose           # 详细日志
+python YmaC/ymac_ioc.py -d <工程根> --force             # 忽略缓存强制重解析
+```
+
+从 CubeMX `.ioc` 提取 MCU/HRTIM/ADC/UART/CAN 外设信息 → YAML + 控制台摘要（MCU 型号、外设计数）。等价 `xr_parse_ioc`，供 `ymac_cfg`/GUI 复用同一解析逻辑。
+
+### 3.5 与 LibXR 工具链指令对照（对齐基准：`LibXR_CppCodeGenerator`）
+
+| LibXR 指令 | 作用 | HardC 对应 | 状态 |
+|-----------|------|-----------|------|
+| `xr_cubemx_cfg` | 配置 CubeMX 工程 + submodule + 生成 | `ymac_cfg.py` | ✅ 对标（含三宏注入/编译）|
+| `xr_parse_ioc` | `.ioc` → YAML + 摘要 | `ymac_ioc.py` | ✅ 新增 |
+| `xr_parse` | 通用 YAML → 外设 | `ioc_parse.py`（库内） | ✅ 已内建 |
+| `xr_gen_code_stm32` | YAML → STM32 代码 | `gen_app.py`（engine 调用） | ✅ 已内建 |
+| `xr_gen_code` | YAML → 平台无关代码 | `scaffold.py gen` | ⚠️ 概念相近 |
+| `xr_stm32_cmake` / `xr_libxr_cmake` | 生成/C库 CMake 注入 | `cmake/HardC.CMake` + `cmake_integrate.py` | ✅ 对标 |
+| `xr_stm32_flash` | 型号 → Flash 扇区表 | `flash_map_gen.py list/show/gen` | ✅ 覆盖 |
+| `xr_cubemx_generate` | 独立跑 CubeMX 脚本生成 | （不自动调 CubeMX GUI） | ⏳ 显式留白 |
+| `xr_stm32_toolchain_switch` | 工具链切换 | starm-clang 由 PATH + preset 管理 | ⏳ 显式留白 |
+
+> 说明：HardC 不自持 CubeMX GUI 自动化（`xr_cubemx_generate`）与多工具链切换（`xr_stm32_toolchain_switch`）两项——前者需登录/固件包等桌面环境、后者 CMake preset 已覆盖。如需再补可对齐实现。
 
 ---
 
