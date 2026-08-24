@@ -141,8 +141,7 @@ def _run_capture(cmd: list[str], log: LogFn, what: str, timeout: int = 600) -> b
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            bufsize=1, timeout=timeout)
+            text=True, encoding="utf-8", errors="replace", bufsize=1)
         for line in proc.stdout:
             line = line.rstrip()
             tail.append(line)
