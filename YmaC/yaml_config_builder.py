@@ -250,6 +250,34 @@ def scan_configs(conf_dir: Path) -> list[dict]:
     return result
 
 
+def flatten_config_tree(node, prefix: str = "", out=None) -> list[tuple[str, object]]:
+    """把嵌套 config dict 拍平成 [(dotted_key, value), ...]，叶子按 key.join('.') 排序。
+
+    供 Tab1「参数注入」可编辑参数表使用：行 = 参数名(点分路径) + 当前值。
+    """
+    if out is None:
+        out = []
+    for key, val in node.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        if isinstance(val, dict):
+            flatten_config_tree(val, dotted, out)
+        else:
+            out.append((dotted, val))
+    return out
+
+
+def unflatten_config_tree(flat: list[tuple[str, object]]) -> dict:
+    """把 flatten_config_tree 的结果还原成嵌套 dict（点分 key 拆层）。"""
+    root: dict = {}
+    for dotted, val in flat:
+        parts = dotted.split(".")
+        cur = root
+        for p in parts[:-1]:
+            cur = cur.setdefault(p, {})
+        cur[parts[-1]] = val
+    return root
+
+
 def detect_current_config(target_file: Path) -> Optional[str]:
     """读取目标文件，从 CONFIG BEGIN 后提取 /* config: xxx */ 标记。"""
     try:
@@ -460,11 +488,20 @@ def run_cli() -> int:
 #  GUI (lazy import: 仅 main() 调用时加载 PyQt6)
 # ═══════════════════════════════════════════════════════════════
 
+def _config_settings():
+    """QSettings 单例(惰性): 保存 GUI 布局记忆(分割比例等).
+
+    org/app 与 _build_gui 的 setOrganizationName/applicationName 对齐.
+    """
+    from PyQt6.QtCore import QSettings
+    return QSettings("HardC", "YAML Config Builder")
+
+
 def _build_gui() -> int:
     """构建并运行 GUI。PyQt6 在此函数内按需导入。"""
     # ── 延迟导入 PyQt6 ──────────────────────────────────────
     try:
-        from PyQt6.QtCore import QProcess, Qt, QThread, QTimer, pyqtSignal
+        from PyQt6.QtCore import QProcess, QSettings, Qt, QThread, QTimer, pyqtSignal
         from PyQt6.QtGui import QColor, QFont, QPalette
         from PyQt6.QtWidgets import (
             QApplication,
@@ -712,14 +749,23 @@ def _build_gui() -> int:
             root_layout.addWidget(log_group)
 
         def _build_tab_inject(self) -> None:
-            """Tab1「参数注入」— 原单窗口全部交互逻辑整体搬入，行为不变。"""
+            """Tab1「参数注入」— 页内直接改数值 + 写回 YAML，不再依赖手开 YAML。
+
+            布局（学 VS Code 可拖拽分割）：
+              左: 配置变体列表 (可拖宽)
+              右: 上=可编辑参数表(QTableWidget + spinbox, 改完保存写回 YAML)
+                  下=配置详情树 + C 代码预览(上下分割可拖、每组可折叠)
+            所有 QSplitter setHandleWidth(6) 且存/恢复比例, 块有最小尺寸.
+            """
             widget = QWidget()
             layout = QVBoxLayout(widget)
             layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(8)
 
-            # 主分割器
-            splitter = QSplitter(Qt.Orientation.Horizontal)
+            # 主分割器：左列表 | 右面板
+            main_split = QSplitter(Qt.Orientation.Horizontal)
+            main_split.setHandleWidth(6)
+            main_split.setChildrenCollapsible(True)
 
             # 左：配置列表
             left_panel = QWidget()
@@ -731,40 +777,94 @@ def _build_gui() -> int:
             self._list_widget = QListWidget()
             self._list_widget.currentRowChanged.connect(self._on_config_selected)
             left_layout.addWidget(self._list_widget)
-            splitter.addWidget(left_panel)
+            left_panel.setMinimumWidth(180)
+            main_split.addWidget(left_panel)
 
-            # 右：详情 + 预览
+            # 右：可编辑参数表 | 详情+预览（上下可拖分割）
             right_panel = QWidget()
             right_layout = QVBoxLayout(right_panel)
             right_layout.setContentsMargins(0, 0, 0, 0)
 
-            desc_group = QGroupBox("配置详情")
-            desc_inner = QVBoxLayout(desc_group)
+            right_split = QSplitter(Qt.Orientation.Vertical)
+            right_split.setHandleWidth(6)
+            right_split.setChildrenCollapsible(True)
+
+            # ① 可编辑参数表（和 Tab3 运行时调参同款交互）
+            edit_group = QGroupBox("参数编辑（改数值 → 「保存到 YAML」写回）")
+            edit_inner = QVBoxLayout(edit_group)
+            edit_inner.setContentsMargins(6, 10, 6, 6)
+
+            edit_toolbar = QHBoxLayout()
+            self._lbl_edit_cfg = QLabel("未选择配置")
+            self._lbl_edit_cfg.setStyleSheet("color: #888; font-size: 12px;")
+            edit_toolbar.addWidget(self._lbl_edit_cfg, stretch=1)
+            self._btn_save_params = QPushButton("✎ 保存到 YAML")
+            self._btn_save_params.setObjectName("btn_secondary")
+            self._btn_save_params.setEnabled(False)
+            self._btn_save_params.clicked.connect(self._on_save_params_to_yaml)
+            edit_toolbar.addWidget(self._btn_save_params)
+            self._btn_apply_one = QPushButton("▶ 应用（仅注入 C）")
+            self._btn_apply_one.setObjectName("btn_secondary")
+            self._btn_apply_one.setEnabled(False)
+            self._btn_apply_one.clicked.connect(self._on_apply_edited)
+            edit_toolbar.addWidget(self._btn_apply_one)
+            edit_inner.addLayout(edit_toolbar)
+
+            self._param_table = QTableWidget(0, 3)
+            self._param_table.setHorizontalHeaderLabels(["参数 (key.path)", "说明", "当前值"])
+            self._param_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+            self._param_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            self._param_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+            self._param_table.horizontalHeader().setStretchLastSection(False)
+            self._param_table.setColumnWidth(0, 220)
+            self._param_table.setColumnWidth(2, 180)
+            self._param_table.verticalHeader().setVisible(False)
+            self._param_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            edit_inner.addWidget(self._param_table)
+            edit_group.setMinimumHeight(140)
+            right_split.addWidget(edit_group)
+
+            # ② 详情树 + 预览（内层上下可拖）
+            detail_group = QGroupBox("配置详情（只读树）/ C 代码预览")
+            detail_inner = QVBoxLayout(detail_group)
+            detail_inner.setContentsMargins(6, 10, 6, 6)
             self._lbl_desc = QLabel("")
             self._lbl_desc.setWordWrap(True)
-            self._lbl_desc.setStyleSheet("color: #888; font-size: 12px; padding: 4px 0;")
-            desc_inner.addWidget(self._lbl_desc)
+            self._lbl_desc.setStyleSheet("color: #888; font-size: 12px; padding: 2px 0;")
+            detail_inner.addWidget(self._lbl_desc)
+
+            tree_preview_split = QSplitter(Qt.Orientation.Vertical)
+            tree_preview_split.setHandleWidth(6)
+            tree_preview_split.setChildrenCollapsible(True)
+
             self._tree = QTreeWidget()
             self._tree.setHeaderLabels(["Key", "Value"])
             self._tree.header().setStretchLastSection(True)
             self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            desc_inner.addWidget(self._tree)
-            right_layout.addWidget(desc_group)
+            self._tree.setMinimumHeight(80)
+            tree_preview_split.addWidget(self._tree)
 
-            preview_group = QGroupBox("C 代码预览")
-            preview_inner = QVBoxLayout(preview_group)
             self._preview = QPlainTextEdit()
             self._preview.setReadOnly(True)
             self._preview.setMaximumBlockCount(5000)
             mono = QFont("Consolas" if sys.platform == "win32" else "DejaVu Sans Mono", 11)
             self._preview.setFont(mono)
-            preview_inner.addWidget(self._preview)
-            right_layout.addWidget(preview_group)
+            self._preview.setMinimumHeight(60)
+            tree_preview_split.addWidget(self._preview)
+            tree_preview_split.setStretchFactor(0, 2)
+            tree_preview_split.setStretchFactor(1, 3)
 
-            splitter.addWidget(right_panel)
-            splitter.setStretchFactor(0, 1)
-            splitter.setStretchFactor(1, 3)
-            layout.addWidget(splitter, stretch=1)
+            detail_inner.addWidget(tree_preview_split, stretch=1)
+            right_split.addWidget(detail_group)
+            right_split.setStretchFactor(0, 2)
+            right_split.setStretchFactor(1, 3)
+
+            right_layout.addWidget(right_split, stretch=1)
+            right_panel.setMinimumWidth(420)
+            main_split.addWidget(right_panel)
+            main_split.setStretchFactor(0, 1)
+            main_split.setStretchFactor(1, 3)
+            layout.addWidget(main_split, stretch=1)
 
             # 操作按钮
             btn_row = QHBoxLayout()
@@ -788,6 +888,19 @@ def _build_gui() -> int:
 
             widget.setLayout(layout)
             self._tabs.addTab(widget, "参数注入")
+
+            # 恢复上次分割比例 (VS Code 风格: 布局记忆)
+            self._sp_tab1_main, self._sp_tab1_right, self._sp_tab1_tree = \
+                main_split, right_split, tree_preview_split
+            try:
+                st = _config_settings()
+                for name, sp in (("tab1_main", main_split), ("tab1_right", right_split),
+                                 ("tab1_tree", tree_preview_split)):
+                    v = st.value(name) if st else None
+                    if v:
+                        sp.restoreState(v)
+            except Exception:
+                pass
 
         def _build_tab_topology(self) -> None:
             """Tab2「拓扑选择」— 扫描 Config/topologies/*.yaml 生成工程骨架。"""
@@ -818,6 +931,8 @@ def _build_gui() -> int:
 
             # 主分割器：左拓扑列表 / 右详情 + 参数表
             splitter = QSplitter(Qt.Orientation.Horizontal)
+            splitter.setHandleWidth(6)
+            splitter.setChildrenCollapsible(True)
 
             left_panel = QWidget()
             left_layout = QVBoxLayout(left_panel)
@@ -950,6 +1065,16 @@ def _build_gui() -> int:
 
             widget.setLayout(layout)
             self._tabs.addTab(widget, "拓扑选择")
+
+            # Tab2 主分割可拖 + 布局记忆
+            self._sp_tab2_main = splitter
+            try:
+                st = _config_settings()
+                v = st.value("tab2_main")
+                if v:
+                    splitter.restoreState(v)
+            except Exception:
+                pass
 
         def _build_tab_runtime(self) -> None:
             """Tab3「运行时调参」— 串口 0xFB 帧下发（pyserial 可选）。"""
@@ -1348,6 +1473,9 @@ def _build_gui() -> int:
                 return
             cfg = self._configs[row]
             self._lbl_desc.setText(f"[{cfg['config_id']}]  {cfg['description'] or '（无描述）'}")
+            self._lbl_edit_cfg.setText(f"编辑: [{cfg['config_id']}]  {cfg.get('path', '')}")
+
+            self._populate_param_table(cfg["config"], cfg["config_id"])
 
             self._tree.clear()
             self._populate_tree(self._tree.invisibleRootItem(), cfg["config"])
@@ -1357,6 +1485,113 @@ def _build_gui() -> int:
                 self._preview.setPlainText(render_config_block(cfg["config"]))
             except Exception as exc:
                 self._preview.setPlainText(f"/* 渲染错误: {exc} */")
+
+        def _populate_param_table(self, config: dict, cfg_id: str) -> None:
+            """把 config 树拍平成可编辑参数表 (key / 说明 / 数值 spinbox).
+            值类型: bool→checkbox, 数字→QDoubleSpinBox, 其它→只读文本.
+            表内改动可通过「保存到 YAML」写回 (on_save_params_to_yaml)."""
+            self._param_table.setRowCount(0)
+            self._param_flat_raw: list[tuple[str, object]] = []
+            self._param_editors: dict[str, object] = {}
+            self._param_cfg_id = cfg_id
+            for dotted, val in flatten_config_tree(config):
+                self._param_flat_raw.append((dotted, val))
+                row = self._param_table.rowCount()
+                self._param_table.insertRow(row)
+                # 说明列: 用最后的段做提示, 完整路径在 col0
+                self._param_table.setItem(row, 0, QTableWidgetItem(dotted))
+                self._param_table.setItem(row, 1, QTableWidgetItem(dotted.rsplit(".", 1)[-1]))
+
+                if isinstance(val, bool):
+                    w = QComboBox()
+                    w.addItems(["false", "true"])
+                    w.setCurrentIndex(1 if val else 0)
+                    self._param_table.setCellWidget(row, 2, w)
+                    self._param_editors[dotted] = ("bool", w)
+                elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                    box = QDoubleSpinBox()
+                    box.setDecimals(6)
+                    box.setRange(-1e9, 1e9)
+                    box.setValue(float(val))
+                    box.setToolTip(dotted)
+                    self._param_table.setCellWidget(row, 2, box)
+                    self._param_editors[dotted] = ("num", box)
+                else:
+                    # 非 bool/数字: 字符串/列表等 → 只读展示; 收集时还原原对象
+                    it = QTableWidgetItem(str(val))
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    it.setToolTip(str(val))
+                    self._param_table.setItem(row, 2, it)
+                    self._param_editors[dotted] = ("text", val)
+            self._btn_save_params.setEnabled(True)
+            self._btn_apply_one.setEnabled(True)
+
+        def _collect_edited_config(self) -> dict:
+            """从可编辑参数表收集当前值 → 还原成嵌套 config dict. (未选时返回 {})."""
+            flat: list[tuple[str, object]] = []
+            for dotted, raw in getattr(self, "_param_flat_raw", []):
+                ed = self._param_editors.get(dotted)
+                if ed is None:
+                    flat.append((dotted, raw))
+                    continue
+                kind, w = ed
+                if kind == "bool":
+                    flat.append((dotted, w.currentIndex() == 1))
+                elif kind == "num":
+                    flat.append((dotted, w.value()))
+                else:
+                    flat.append((dotted, w))
+            return unflatten_config_tree(flat)
+
+        def _on_save_params_to_yaml(self) -> None:
+            """把页内改动的参数写回当前选中的 YAML (不再手开 YAML)."""
+            row = self._list_widget.currentRow()
+            if row < 0 or row >= len(self._configs):
+                return
+            cfg = self._configs[row]
+            path = cfg["path"]
+            new_config = self._collect_edited_config()
+            doc = {
+                "config_id": cfg["config_id"],
+                "description": cfg["description"],
+                "config": new_config,
+            }
+            try:
+                path.write_text(
+                    yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, default_flow_style=False),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "保存失败", str(exc))
+                return
+            self._log_msg(f"✓ 参数已保存 → {path}")
+            # 重扫 + 刷新, 树/预览同步最新
+            self._configs[row]["config"] = new_config
+            self._refresh_config_list()
+            self._list_widget.setCurrentRow(row)
+
+        def _on_apply_edited(self) -> None:
+            """把页内改动的参数直接注入 C 代码 (不写 YAML)."""
+            new_config = self._collect_edited_config()
+            target = getattr(self, "_target_file", None)
+            if target is None:
+                QMessageBox.warning(self, "无注入目标",
+                                    "未找到注入目标（HardC 需先在拓扑 Tab 生成工程并物化 app_main.c）。")
+                return
+            row = self._list_widget.currentRow()
+            cid = self._configs[row]["config_id"] if 0 <= row < len(self._configs) else "edited"
+            try:
+                rendered = render_config_block(new_config)
+            except Exception as exc:
+                QMessageBox.critical(self, "渲染错误", str(exc))
+                return
+            if inject_config(target, rendered, cid):
+                self._current_id = cid
+                self._lbl_current.setText(f"当前注入: {cid}")
+                self._log_msg(f"✓ 编辑值已注入 {target} (config={cid})")
+                self._preview.setPlainText(rendered)
+            else:
+                QMessageBox.critical(self, "注入失败", f"无法写入 {target}。")
 
         def _on_apply(self) -> None:
             row = self._list_widget.currentRow()
@@ -2080,6 +2315,17 @@ def _build_gui() -> int:
                 self._build_process.kill()
                 self._build_process.waitForFinished(2000)
             self._close_serial()
+            # 保存分割布局记忆 (VS Code 风格)
+            try:
+                st = _config_settings()
+                for name, sp in (("tab1_main", getattr(self, "_sp_tab1_main", None)),
+                                 ("tab1_right", getattr(self, "_sp_tab1_right", None)),
+                                 ("tab1_tree", getattr(self, "_sp_tab1_tree", None)),
+                                 ("tab2_main", getattr(self, "_sp_tab2_main", None))):
+                    if sp is not None:
+                        st.setValue(name, sp.saveState())
+            except Exception:
+                pass
             super().closeEvent(event)
 
     # ── 启动 GUI ──────────────────────────────────────────────
