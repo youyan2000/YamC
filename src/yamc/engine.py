@@ -28,6 +28,9 @@ LogFn = Callable[[str, str], None]
 
 DEFAULT_HARDC_REL = "Middlewares/Third_Party/HardC"
 
+# 陌生工程无本地 hardc 时的默认拉取源（GUI 与 CLI 缺省用此 URL submodule 拉入工程）
+DEFAULT_HARDC_GIT_SOURCE = "https://github.com/youyan2000/HardC.git"
+
 # 默认日志前缀 (CLI 传自己的 _log, 此处仅兜底打印用, 大小写与 CLI 一致)
 _LEVEL_TAG = {"info": "INFO", "pass": "Pass", "warn": "WARN", "fail": "FAIL"}
 
@@ -244,7 +247,10 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
     opts = opts or {}
     no_submodule = bool(opts.get("no_submodule", False))
     hardc_path = opts.get("hardc_path")
-    git_source = opts.get("git_source")
+    # 陌生工程缺省自动拉取 hardc（submodule 到工程内）；no_submodule 且无 hardc_path 时才退到本地定位
+    git_source = opts.get("git_source") if opts.get("git_source") is not None else DEFAULT_HARDC_GIT_SOURCE
+    if no_submodule:
+        git_source = None
     no_build = bool(opts.get("no_build", False))
     out_rel = str(opts.get("out_rel", "User/Application"))
     gen_bootloader_force = bool(opts.get("gen_bootloader", False))

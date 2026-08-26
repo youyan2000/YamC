@@ -145,6 +145,7 @@ def _build_gui() -> int:
             QMessageBox,
             QPlainTextEdit,
             QPushButton,
+            QRadioButton,
             QScrollArea,
             QSplitter,
             QTabWidget,
@@ -432,7 +433,7 @@ def _build_gui() -> int:
             t.start()
 
         def _build_tab_project(self) -> None:
-            """Tab1「项目识别」— 自检 / 探测 / 外部接入 / Bootloader / 生成工程（动作=等价 yamc 命令）。"""
+            """Tab1「项目识别」— 自检 / 探测 / 外部接入 / Bootloader（动作=等价 yamc 命令）。"""
             from yamc import cli as _cli
 
             widget = QWidget()
@@ -440,7 +441,16 @@ def _build_gui() -> int:
             layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(8)
 
-            # 自检 + 探测
+            # 可拖拽主分割（问题2）：上部=动作按钮 + 外部接入，下部=日志
+            self._sp_tab_proj = QSplitter(Qt.Orientation.Vertical)
+            self._sp_tab_proj.setHandleWidth(6)
+            self._sp_tab_proj.setChildrenCollapsible(False)
+
+            top_panel = QWidget()
+            top_layout = QVBoxLayout(top_panel)
+            top_layout.setContentsMargins(0, 0, 0, 0)
+            top_layout.setSpacing(8)
+
             row1 = QHBoxLayout()
             btn_check = QPushButton("🏥 自检 (yamc check)")
             btn_check.clicked.connect(lambda: self._run_cli_in_thread(_cli.cmd_check, []) or self._set_cmd("yamc check"))
@@ -452,29 +462,49 @@ def _build_gui() -> int:
             btn_ccs.clicked.connect(lambda: self._on_cmd_cubemx() or self._set_cmd("yamc cubemx_generate -d <工程根>"))
             row1.addWidget(btn_ccs)
             row1.addStretch()
-            layout.addLayout(row1)
+            top_layout.addLayout(row1)
 
             btn_row = QHBoxLayout()
-            self._btn_proj_gen = QPushButton("⚒ 生成工程 (yamc topo gen)")
-            self._btn_proj_gen.setToolTip("用 Tab2 当前选中拓扑生成骨架（先到 Tab2 选拓扑）")
-            self._btn_proj_gen.clicked.connect(self._on_proj_gen)
-            btn_row.addWidget(self._btn_proj_gen)
-
             self._btn_proj_bl = QPushButton("🚀 Bootloader (yamc gen_bootloader)")
             self._btn_proj_bl.clicked.connect(self._on_proj_bootloader)
             btn_row.addWidget(self._btn_proj_bl)
             btn_row.addStretch()
-            layout.addLayout(btn_row)
+            top_layout.addLayout(btn_row)
 
             # 外部工程接入（yamc cfg_run 完整流水线，engine 后台线程）
-            self._build_ext_panel(layout)
+            self._build_ext_panel(top_layout)
 
-            layout.addStretch()
-            self._add_tab_log(widget, layout)
+            top_panel.setMinimumSize(0, 200)
+            self._sp_tab_proj.addWidget(top_panel)
+
+            # 日志面板（问题2：可拖高）
+            log_group = QGroupBox("日志")
+            log_inner = QVBoxLayout(log_group)
+            log = QPlainTextEdit()
+            log.setReadOnly(True)
+            log.setMaximumBlockCount(2000)
+            log.setFont(QFont("Consolas" if sys.platform == "win32" else "DejaVu Sans Mono", 11))
+            log.setMinimumHeight(90)
+            log_inner.addWidget(log)
+            self._tab_logs[widget] = log   # 以 widget 为键（_add_tab_log 同语义）
+            log_group.setMinimumSize(0, 90)
+            self._sp_tab_proj.addWidget(log_group)
+            self._sp_tab_proj.setStretchFactor(0, 3)
+            self._sp_tab_proj.setStretchFactor(1, 2)
+
+            layout.addWidget(self._sp_tab_proj, stretch=1)
             self._tabs.addTab(widget, "项目识别")
 
         def _build_ext_panel(self, layout: QVBoxLayout) -> None:
-            """外部工程接入面板（= yamc cfg_run；由 Tab1 项目识别持有）。"""
+            """外部工程接入面板（= yamc cfg_run；由 Tab1 项目识别持有）。
+
+            hardc 接入三选一（问题3，陌生工程默认自动拉取）：
+              - 自动接入(默认): 用下方 hardc URL submodule 拉进工程 Middlewares/Third_Party/HardC
+              - 已有本地: 填本机 hardc 目录 (--hardc-path)
+              - 环境已有: 用相邻 ../hardc 或 env HARDC_LIB_DIR (--no-submodule)
+            """
+            from yamc import engine as _engine
+
             ext_group = QGroupBox("外部工程接入（yamc cfg_run 完整流水线 → 真实 CubeMX/C2000 工程）")
             ext_inner = QVBoxLayout(ext_group)
             ext_inner.setContentsMargins(8, 12, 8, 8)
@@ -499,12 +529,42 @@ def _build_gui() -> int:
             self._lbl_ext_probe.setStyleSheet("color: #888; font-size: 12px;")
             ext_inner.addWidget(self._lbl_ext_probe)
 
+            # hardc 接入方式（三选一）
+            mode_row = QHBoxLayout()
+            mode_row.addWidget(QLabel("HardC 库:"))
+            self._radio_ext_auto = QRadioButton("自动接入(submodule)")
+            self._radio_ext_auto.setToolTip("将下方 URL 以 git submodule 拉进工程 Middlewares/Third_Party/HardC（陌生工程首选）")
+            self._radio_ext_auto.setChecked(True)
+            mode_row.addWidget(self._radio_ext_auto)
+            self._radio_ext_path = QRadioButton("已有本地目录")
+            mode_row.addWidget(self._radio_ext_path)
+            self._radio_ext_env = QRadioButton("环境已有(../hardc)")
+            mode_row.addWidget(self._radio_ext_env)
+            mode_row.addStretch()
+            ext_inner.addLayout(mode_row)
+
+            # 自动接入 → git URL；已有本地 → 目录路径（靠模式切换显隐）
+            self._edit_ext_hardc = QLineEdit()
+            self._edit_ext_hardc.setPlaceholderText("HardC 仓库 URL（默认官方）")
+            self._edit_ext_hardc.setText(_engine.DEFAULT_HARDC_GIT_SOURCE)
+            self._lbl_ext_hardc = QLabel("HardC URL:")
+            hc_row = QHBoxLayout()
+            hc_row.addWidget(self._lbl_ext_hardc)
+            hc_row.addWidget(self._edit_ext_hardc, stretch=1)
+            ext_inner.addLayout(hc_row)
+
+            def _on_mode_changed() -> None:
+                auto = self._radio_ext_auto.isChecked()
+                self._lbl_ext_hardc.setText("HardC URL:" if auto else "本地 HardC 目录:")
+                self._edit_ext_hardc.setPlaceholderText(
+                    "HardC 仓库 URL（默认官方）" if auto else "本地 HardC 库根（含 cmake/HardC.CMake）"
+                )
+            for rb in (self._radio_ext_auto, self._radio_ext_path, self._radio_ext_env):
+                rb.toggled.connect(_on_mode_changed)
+
             opt_row = QHBoxLayout()
             self._chk_ext_no_build = QCheckBox("跳过编译")
-            self._chk_ext_no_sub = QCheckBox("跳过 submodule (adopt 已有目录)")
-            self._chk_ext_no_sub.setChecked(True)
             opt_row.addWidget(self._chk_ext_no_build)
-            opt_row.addWidget(self._chk_ext_no_sub)
             opt_row.addStretch()
             ext_inner.addLayout(opt_row)
 
@@ -518,17 +578,6 @@ def _build_gui() -> int:
             root = getattr(self, "_project_root", None)
             argv = ["-d", str(root)] if root else []
             self._run_cli_in_thread(_cli.cmd_cubemx_generate, argv)
-
-        def _on_proj_gen(self) -> None:
-            """Tab1「生成工程」→ 复用 Tab2 拓扑选择状态（= yamc topo gen <name>）。"""
-            topo = getattr(self, "_current_topo", None)
-            if topo is None:
-                self._log_msg("✗ 未选择拓扑 — 请到「拓扑选择」页先选一个（或先用探测发现项目）")
-                return
-            name = str(topo.get("name") or "project")
-            self._set_cmd(f"yamc topo gen {name} --bootloader" if getattr(self, "_chk_gen_bootloader", None) and self._chk_gen_bootloader.isChecked()
-                          else f"yamc topo gen {name}")
-            self._on_topo_generate()
 
         def _on_proj_bootloader(self) -> None:
             """Tab1「Bootloader」→ 独立生成 bootloader_main（= yamc gen_bootloader）。"""
@@ -1794,12 +1843,30 @@ def _build_gui() -> int:
                 return
             topo_name = str(self._current_topo.get("name") or "buck")
             params = self._build_config_from_form()  # {"power": {...}} → engine 归一化平铺
-            opts = {
-                "no_submodule": self._chk_ext_no_sub.isChecked(),
-                "no_build": self._chk_ext_no_build.isChecked(),
-            }
+            from yamc import engine as _engine
+
+            # 三选一接入模式（问题3）：默认自动 submodule 拉取 hardc
+            if self._radio_ext_auto.isChecked():
+                git_src = self._edit_ext_hardc.text().strip() or _engine.DEFAULT_HARDC_GIT_SOURCE
+                opts = {"no_submodule": False, "git_source": git_src,
+                        "no_build": self._chk_ext_no_build.isChecked()}
+                mode_desc = f"hardc 自动接入(submodule {git_src})"
+            elif self._radio_ext_path.isChecked():
+                hc_path = self._edit_ext_hardc.text().strip()
+                opts = {"no_submodule": True, "hardc_path": Path(hc_path) if hc_path else None,
+                        "no_build": self._chk_ext_no_build.isChecked()}
+                mode_desc = f"hardc 用本地目录 {hc_path or '(未填)'}"
+            else:  # env / adjacent ../hardc
+                opts = {"no_submodule": True, "no_build": self._chk_ext_no_build.isChecked()}
+                mode_desc = "hardc 用环境(相邻 ../hardc / HARDC_LIB_DIR)"
+
             self._btn_ext_run.setEnabled(False)
-            self._log_msg(f"──────────────── 外部工程接入开始: {topo_name} → {text} ────────────────")
+            self._log_msg(f"──────────────── 外部工程接入开始: {topo_name} → {text}  [{mode_desc}] ────────────────")
+            self._set_cmd(f"yamc cfg_run -d {text} -t {topo_name}" +
+                          (f" --git-source {opts.get('git_source')}" if opts.get("git_source") else "") +
+                          (" --hardc-path " + opts["hardc_path"] if opts.get("hardc_path") else "") +
+                          (" --no-submodule" if opts.get("no_submodule") and not opts.get("hardc_path") else "") +
+                          (" --no-build" if opts.get("no_build") else ""))
             self._engine_thread = _EngineRunThread(Path(text), topo_name, params, opts)
             self._engine_thread.line.connect(self._log_msg)
             self._engine_thread.done.connect(self._on_ext_done)
@@ -1985,9 +2052,9 @@ def _build_gui() -> int:
         def _merge_non_slot(self, inner: dict) -> None:
             """把拓扑 pwm/adc 段的非槽位字段并入 inner (不覆盖表单已有值)。
 
-            pwm.ch_drive/duty_min/duty_max → ModBuckCfg 同名字段;
-            adc.roles.<vout|iout|vin>.ch → ModBuckCfg.adc_ch_<role>。
-            freq_hz/sync_rect/mode/deadtime_ns 不属 ModBuckCfg, 不注入。
+            pwm.ch_drive/duty_min/duty_max → GenBuckCfg 同名字段;
+            adc.roles.<vout|iout|vin>.ch → GenBuckCfg.adc_ch_<role>。
+            freq_hz/sync_rect/mode/deadtime_ns 不属 GenBuckCfg, 不注入。
             """
             topo = self._current_topo or {}
             pwm = topo.get("pwm") or {}

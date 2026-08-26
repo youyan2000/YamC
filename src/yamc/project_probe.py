@@ -167,6 +167,8 @@ def probe_all(start: Optional[Path] = None, hardc_path: Optional[Path] = None) -
 
     hardc = probe_hardc_lib(root if root else start, hardc_path)
     out["hardc"] = str(hardc) if hardc else None
+    # hardc 可自动导入标志: 无本地硬, 但可用 DEFAULT 官方 git-source submodule 拉入工程
+    out["hardc_auto_import"] = hardc is None
     out["cmake"] = shutil.which("cmake")
     out["git"] = shutil.which("git")
 
@@ -180,7 +182,7 @@ def probe_all(start: Optional[Path] = None, hardc_path: Optional[Path] = None) -
     if hardc is not None:
         out["ok"] = True
     elif not out.get("reason"):
-        out["reason"] = "未找到 hardc 库根: 设 HARDC_LIB_DIR 或用 --hardc-path"
+        out["reason"] = "未发现本地 hardc 库根 — 接入时将自动 submodule 拉取官方 HardC（可在转命令行加 --git-source 指定）"
     return out
 
 

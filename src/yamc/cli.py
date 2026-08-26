@@ -233,7 +233,8 @@ def cmd_cfg_run(argv: Optional[list[str]] = None) -> int:
                                  description="HardC 接入工具链（对标 xr_cubemx_cfg）")
     ap.add_argument("-d", "--dir", default=".", help="外部工程根（含 .ioc/.syscfg）")
     ap.add_argument("-t", "--topology", default="buck", help="拓扑名")
-    ap.add_argument("--git-source", default=None, help="HardC git 仓库 URL（submodule add）")
+    ap.add_argument("--git-source", default=None,
+                    help=f"HardC git 仓库 URL（submodule add; 缺省 {engine.DEFAULT_HARDC_GIT_SOURCE}）")
     ap.add_argument("--hardc-path", default=None, help="--no-submodule 时 HardC 目录路径")
     ap.add_argument("--no-submodule", action="store_true", help="adopt 已有 HardC 目录")
     ap.add_argument("--no-build", action="store_true", help="跳过构建")
@@ -309,7 +310,7 @@ def cmd_probe(argv: Optional[list[str]] = None) -> int:
     print(f"[Info] 平台:   {info.get('platform') or '未识别（需 .ioc / main.syscfg）'}")
     print(f"[Pass] .ioc:   {info.get('ioc') or '—'}")
     print(f"[Pass] syscfg: {info.get('syscfg') or '—'}")
-    print(f"[Pass] hardc:  {info.get('hardc') or '未找到（设 HARDC_LIB_DIR 或 --hardc-path）'}")
+    print(f"[Info] hardc:  {info.get('hardc') or '未发现（接入时自动拉取官方 HardC）'}")
     print(f"[Pass] cmake:  {info.get('cmake') or '未找到'}")
     for name, path in (info.get("toolchains") or {}).items():
         print(f"[Info] {name}: {path or '未找到'}")
@@ -333,8 +334,8 @@ def cmd_check(argv: Optional[list[str]] = None) -> int:
     if info.get("hardc"):
         print(f"[Pass] hardc 库根: {info['hardc']}")
     else:
-        print(f"[FAIL] hardc 库根未找到：设 HARDC_LIB_DIR 或用 --hardc-path")
-        fails += 1
+        print(f"[WARN] 未发现本地 hardc — 接入时自动 submodule 拉取官方 HardC（--git-source 可改）")
+        fails += 0
     if info.get("cmake"):
         print(f"[Pass] cmake: {info['cmake']}")
     else:
@@ -378,7 +379,8 @@ def cmd_topo(argv: Optional[list[str]] = None) -> int:
 
     hardc = topo.resolve_hardc(Path(args.dir), args.hardc_path)
     if hardc is None:
-        print(f"[FAIL] 未找到 hardc 库根（设 HARDC_LIB_DIR 或 --hardc-path）", file=sys.stderr)
+        print("[FAIL] 未找到 hardc 库根 — 请先 `yamc cfg_run -d <工程>` 自动接入 HardC"
+              "（或设 HARDC_LIB_DIR / --hardc-path）", file=sys.stderr)
         return 1
 
     if args.command == "list":
