@@ -39,7 +39,7 @@ LAYER_DIRS = {
 LAYER_ORDER = ["BSP", "Components", "Devices", "Module", "App"]
 
 # 上下文归位（三件事 → 三上下文）
-CTX_VALUES = ("fast", "slow", "main")
+CTX_VALUES = ("fast", "slow", "hmi", "main")
 
 # 扫描 MANIFEST 的层目录（顺序即扫描顺序，保证输出稳定）
 _SCAN_DIRS = ["BSP", "Components", "Devices", "Module", "App"]

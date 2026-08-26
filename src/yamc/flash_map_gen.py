@@ -149,12 +149,28 @@ def resolve_partitions(mcu_cfg):
       if a["addr"] < b["addr"] + b["size"] and b["addr"] < a["addr"] + a["size"]:
         raise FlashMapError(f"分区 '{an}' 与 '{bn}' 交叉重叠")
 
+  # ---- P1: 页对齐纪律 (仅 STM32/ARM 按 page 擦除) ----
+  # App 起始必须页对齐, 不能 = Bootloader 大小简单相加 (Bootloader 占不满整页会跨页).
+  # 校验: 对 page_size 型 MCU, bootloader/app 分区 addr 必须为 page_size 整数倍;
+  # 不齐即报错并提示应取整页 (flash_map_gen.py 注入的 app_flash.ld 以此为准).
+  # (param/Database 等尾部非固件区可不整页, 只检 bootloader/app.)
+  if page is not None:
+    for an in ("bootloader", "app"):
+      a = parts.get(an)
+      if a is not None and a["addr"] % page != 0:
+        aligned = ((a["addr"] + page - 1) // page) * page
+        raise FlashMapError(
+          f"分区 '{an}' addr 0x{a['addr']:08X} 未按页对齐 (page={page}B) — "
+          f"App/Bootloader 起始页对齐: 应取 0x{aligned:08X}"
+        )
+
   return {
     "flash_base": fb,
     "flash_size": fs,
     "page_size": page,
     "sector_size": sector,
     "partitions": parts,
+    "align": page if page is not None else (sector if sector is not None else None),
   }
 
 
@@ -240,7 +256,7 @@ def cmd_show(maps, mcu):
   for pn, pc in sorted(cfg["partitions"].items(), key=lambda kv: kv[1]["addr"]):
     print(f"  {pn:<12} [0x{pc['addr']:08X} .. 0x{pc['addr'] + pc['size'] - 1:08X}]  "
           f"size {pc['size']} B")
-  # 推导值（供 mod_bootloader 配置）
+  # 推导值（供 boot_loader 配置）
   app = cfg["partitions"].get("app")
   if app:
     print(f"  app_addr=0x{app['addr']:08X}  app_max_size={app['size']}")
@@ -280,7 +296,7 @@ def _write_flash_map_h(cfg):
   lines.append("} BspFlashRegion;")
   lines.append("")
 
-  # 便捷宏：每分区的地址/大小，保证 mod_bootloader 配置直接取
+  # 便捷宏：每分区的地址/大小，保证 boot_loader 配置直接取
   for pn, pc in parts.items():
     macro = f"BSP_FLASH_{pn.upper()}".replace("-", "_")
     lines.append(f"#define {macro}_ADDR  {ach(pc['addr'])}")
