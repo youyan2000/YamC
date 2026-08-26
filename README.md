@@ -1,181 +1,168 @@
-# yamc 使用说明
+# yamc
 
-**yamc = HardC 的配置与接入工具链**（YAML → C 注入 + 拓扑生成 + 外部 CubeMX 工程接入 + 双固件/OTA 编排）。
-本仓库是独立工具仓库（GitHub `YamC`）；零件库在 [hardc](../hardc)（GitHub `HardC`），文档在根容器 [../docs](../docs)（本地）。
+> **HardC 的"装配线"** —— 把 STM32 / C2000 的嵌入式工程，变成跑上 [HardC](https://github.com/youyan2000/HardC) 电源/电机控制算法的成品：一条命令做库接入、外设探测、代码生成、编译出 `.elf/.hex`，再用 GUI 或 CLI 调参。
 
-一个工具链，三种干活方式：
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
+![Platforms](https://img.shields.io/badge/platform-STM32%20%7C%20C2000-green)
+![license](https://img.shields.io/badge/license-MIT-blue)
 
-| 方式 | 入口 | 适合 |
-|------|------|------|
-| **GUI** | `python yaml_config_builder.py` | 点按钮、看反馈、对工程做骨架/调参 |
-| **CLI 流水线** | `python yamc_cfg.py -d <工程> --topology buck` | 一键把 HardC 接入**真实 CubeMX 工程**（含三宏注入 + 编译） |
-| **CLI 单体命令** | `scaffold.py` / `flash_map_gen.py` / `merge_firmware.py` / `yamc_ioc.py` | 脚本化 / 与 GUI Tab4 逐项对应 |
+HardC 是**库**（一堆 C99 组件，PWM/PID/ADC/PLL/保护…），yamc 是**装配线**：你给它一个 CubeMX（`.ioc`）或 CCS（`main.syscfg`）工程 + 一个拓扑名，它自动完成下面第 ②~⑤ 步，之后你在 App 层写自己的 HMI。
 
-> 命令一律在**本仓库根**执行（脚本已扁平化，无 `yamc/` 前缀）。本文件是**完整操作手册**：怎么定位库根、怎么配置、怎么接入真实工程、怎么排查。
-
----
-
-## 0. 先懂：yamc 怎么找 hardc 库根（拆分后关键）
-
-工具本身**不含**零件库（cmake/、Config/ 都在 hardc 仓库）。运行时的**库根解析顺序**：
-
-1. **`HARDC_LIB_DIR`** 环境变量（最高优先）
-   ```powershell
-   $env:HARDC_LIB_DIR = "F:\My_Projects\HardC\hardc"
-   ```
-2. **`--hardc-path`**（显式给命令）
-   ```powershell
-   python yamc_cfg.py -d <工程> --topology buck --no-submodule --hardc-path F:\My_Projects\HardC\hardc
-   ```
-3. **同级 `../hardc`**（本地三仓库平铺时自动命中：`F:\My_Projects\HardC\hardc`）
-4. **工程内 submodule**（`Middlewares/Third_Party/HardC`，`--git-source` 接入时）
-
-库根被 `ensure_hardc_dir` 校验：必须含 `cmake/HardC.CMake`。找不到报"找不到 hardc 库根: 设 HARDC_LIB_DIR 或 --hardc-path"。
-
-> 本地三仓库平铺时，直接 `python yamc_cfg.py -d <工程> --topology buck` 即命中 `../hardc`，无需任何参数。
-
----
-
-## 1. 安装与依赖
-
-```bash
-pip install pyyaml            # 必需（所有脚本）
-pip install PyQt6 darkdetect  # GUI 必需
-pip install pyserial          # Tab3 运行时调参（可选）
+```
+ ① 已有 CubeMX/CCS 工程（.ioc / main.syscfg）
+ ② HardC 库接入（git submodule）
+ ③ 外设自动探测（HRTIM/ADC/UART/CAN… → 外设表）
+ ④ 生成 App 骨架（app_main.c/h + 拓扑/参数绑定）
+ ⑤ CMake 集成 + 编译（.elf / 合并 .hex）
 ```
 
-编译需 `cmake`（建议 `-G Ninja`），STM32 需 `starm-clang`（在库根 `cmake/`），C2000 需 `cl2000`/`C2000Ware`。
+---
+
+## ✨ 它解决什么问题
+
+嵌入式开发里重复的脏活：**从 CubeMX 到"能跑的控制 App"** 之间是长串手工步骤——加库、读 .ioc 抄外设句柄、写 CMake、配中断优先级、烧录前合并 bootloader。yamc 全部自动化，并给你两套操作方式：
+
+| | CLI（脚本化/CI/远程） | GUI（交互式探索） |
+|---|---|---|
+| 接入工程 | `yamc cfg_run -d <工程> --topology buck` | 「项目识别」Tab → 填工程根 → 运行完整接入 |
+| 改参数 | `yamc params` / `yamc tune_static` | 「参数注入」Tab → 表格直接改 → 保存/注入/编译 |
+| 运行时调参 | `yamc serial tune --port COMx --param pid_v.kp=2.0` | 「运行时调参」Tab → 串口 0xFB 下发 |
+| 看环境 | `yamc probe` / `yamc check` | 「项目识别」Tab → 自检 / 探测 |
+
+> 每个 GUI 按钮旁边都显示它对应的 `yamc ...` 命令并一键复制——**在 GUI 学会 → 拿到脚本**。
 
 ---
 
-## 2. GUI 使用（Tab1–Tab4）
+## 🚀 快速上手
 
-启动（本仓库根）：`python yaml_config_builder.py`
-
-- **Tab1 参数注入**：选配置变体 → 页内可编辑参数表 → 预览 → 注入物化的 `app_main.c` → 编译。
-- **Tab2 拓扑选择**：列库根 `Config/topologies/*.yaml`（`status: ready` 才可生成：buck/supercap_3ph）→ 填工程名/MCU/变体 → 参数表编辑 → 可选勾「Bootloader(双固件+OTA)」→ 生成/注入/编译（Ninja + starm-clang）。
-  - 底部「外部工程接入」：填工程根（含 .ioc）→ 探测 → 运行完整接入（与 `yamc_cfg` 同流水线）。
-- **Tab3 运行时调参**：串口 0xFB 帧下发（需 pyserial）。
-- **Tab4 工具 (CLI)**：GUI ≅ CLI 对齐（scaffold scan/gen/deps、flash_map list/show/gen、merge selftest/merge/info）。「工具运行根」指 hardc 库根；默认取 `HARDC_LIB_DIR` 或同级 `../hardc`。
-
----
-
-## 3. CLI 单体命令（仓库根执行）
-
-### scaffold.py — MANIFEST 扫描 / 依赖解析 / 骨架生成
-```bash
-python scaffold.py scan                     # 校验库根全部 MANIFEST
-python scaffold.py deps components/pid      # 传递闭包依赖
-python scaffold.py gen Config/projects/buck.yaml --out build/gen/my_buck
-```
-
-### flash_map_gen.py — Flash 分区 → bsp_flash_map.h + 链接脚本
-```bash
-python flash_map_gen.py list
-python flash_map_gen.py show --mcu stm32f334
-python flash_map_gen.py gen --mcu stm32f334 --out build/gen/x
-```
-
-### merge_firmware.py — Intel HEX 合并 / 信息 / 自检
-```bash
-python merge_firmware.py merge bootloader.hex app.hex -o merged.hex
-python merge_firmware.py info build/gen/buck/build/app.hex
-python merge_firmware.py selftest
-```
-
-### yamc_ioc.py — 解析 CubeMX `.ioc` → 外设 YAML + 摘要
-```bash
-python yamc_ioc.py -d <工程根>                  # 摘要 + .hardc/<stem>.periph.yaml
-python yamc_ioc.py -d <工程根> -o out.yaml --verbose --force
-```
-
-### 与 LibXR 工具链对照
-| LibXR | yamc 对应 | 状态 |
-|-------|-----------|------|
-| `xr_cubemx_cfg` | `yamc_cfg.py` | ✅ 对标 |
-| `xr_parse_ioc` | `yamc_ioc.py` | ✅ |
-| `xr_gen_code_stm32` | `gen_app.py`（engine 调用） | ✅ 内建 |
-| `xr_stm32_cmake` | `cmake_integrate.py` + 库根 `HardC.CMake` | ✅ |
-| `xr_stm32_flash` | `flash_map_gen.py` | ✅ 覆盖 |
-| `xr_cubemx_generate` / `xr_stm32_toolchain_switch` | 显式留白 | ⏳ |
-
----
-
-## 4. 接入真实 CubeMX 工程（端到端，核心）
-
-**这是把 HardC 接进你自己的 STM32/C2000 工程的正道。**
-
-### 4.1 CubeMX 侧先配好（STM32F334 实例）
-
-| 外设 | 用途 | 三档 |
-|------|------|------|
-| **HRTIM1** Timer A (CHTA1/CHTA2 → PA8/PA9) | 发波（Buck） | **FAST** → `HRTIM1_TIMA_IRQn` |
-| **TIM1** (update) | 监控定时器 | **SLOW** → `TIM1_UP_TIM16_IRQn` |
-| **CAN 或 USART2** | 通信 / HMI | **HMI** → `CAN_RX0_IRQn` / `USART2_IRQn` |
-| **ADC1** + **DMA1 CH1** | 采样 vout/iout/vin | — |
-
-在 CubeMX NVIC 勾 Ena. 上表中断（工具从 `.ioc` 探测三宏，依赖此处）。探测不到会 WARN，回 CubeMX 补开再重跑。
-
-### 4.2 一键接入
+### 安装
 
 ```bash
-cd <你的_F334_CubeMX工程根>
-python <yamc仓库>/yamc_cfg.py -d . --topology buck \
-  --git-source https://github.com/youyan2000/HardC.git
-python <yamc仓库>/yamc_cfg.py -d . --topology buck --no-submodule --hardc-path <已有hardc目录>  # adopt 已有库
+git clone https://github.com/youyan2000/YamC.git
+cd YamC
+pip install .            # 核心（pyyaml）
+pip install ".[gui]"     # 可选：PyQt6 GUI
+pip install ".[serial]"  # 可选：串口动态调参
 ```
 
-它做 5 件事：submodule 接入 → `.ioc` 解析 → `User/Application/app_main.c/h` 生成 → CMake 注入幂等 `yamc HardC BEGIN/END` 块（`set(HARDC_DIR…)` + `include(HardC.CMake)` + `target_link_libraries` + 三宏 `target_compile_definitions`）→ 编译 `.elf`。
+装完获得 `yamc`（伞命令）和 22 个 `yamc_*` 命令，**任意目录可用**。
 
-**日志重点**：`✓ CMake 集成: 插入 HardC 块 (series=F3, irq=3)` = 三宏注入成功；`irq=3` 表示 FAST/SLOW/HMI 三宏已注入。
+### 方式 A：GUI
 
-> 三档中断宏：yamc 从 `.ioc` NVIC **自动探测整组**并注入（`HMI_IRQN` + `HMI_IRQN_2..4` 多源：UART/CAN/FDCAN/EXTI 各独立 IRQn）。探测规则按名字：HRTIM→FAST、TIM*_UP→SLOW、CAN/FDCAN/UART/USART/LPUART→HMI；Cortex 核异常自动排除。FAST>SLOW>HMI 由 `bsp_irq_apply` 强制，配错停机。
+```bash
+yamc gui
+```
 
-### 4.3 之后写你的 App 层 HMI
+四个 Tab，跟着走一遍就成了：
 
-生成物含可编译骨架（`User/Application/app_main.c`）。在 `Board_init` / `App_OnControlTick`(FAST ISR) / `App_OnHmiTick`(HMI ISR) / `BackgroundTask`(主循环) 里写你的逻辑：按键去抖/OLED/串口/CAN 归 **HMI**，控制算法归 **FAST**，慢 I/O/printf 归 **BackgroundTask**（不许在 ISR 里 printf）。模板预留 `HMI USER AREA`/`OTA AREA` 接缝。
+| Tab | 你做什么 |
+|---|---|
+| **① 项目识别** | 填工程根 → 「探测」确认平台 → 「运行完整接入」一键做完 ②~⑤ |
+| **② 拓扑选择** | 左边选拓扑（buck / supercap_3ph…）→ 填参数 → 「生成工程」 |
+| **③ 参数注入** | 选一个参数变体 → 表格改值 → 「保存到 YAML」或「仅注入 C」→「编译」 |
+| **④ 运行时调参** | 连串口 → 表格填 PID 系数 → 「下发 0xFB」即时生效 |
 
-### 4.4 验证闭环 checklist
+每个 Tab 底部都是日志面板；顶部命令栏可把当前动作复制成 CLI。
 
-- [ ] `.ioc` 三档中断已在 NVIC 打开
-- [ ] `yamc_cfg -d . --topology …` 日志 `irq=3`
-- [ ] 编译 0 错误，产出 `.elf`
-- [ ] （OTA/双固件）`build/gen/…/build/*.hex` + merge → 单 `_merged.hex`
-- [ ] App 层 HMI 在你的上下文跑通
-- [ ] 改动已 commit + push
+### 方式 B：CLI
+
+**接入一个真实工程**（最常用的一条命令）：
+
+```bash
+yamc cfg_run -d D:/proj/my_psu --topology buck --hardc-path F:/My_Projects/HardC/hardc --no-build
+```
+
+它做了什么：探测平台 → 接 HardC → 解析外设 → 生成 `app_main.c/h` → 注入 CMake →（去掉 `--no-build` 就编译）。
+
+**手动一步步做**：
+
+```bash
+yamc probe                              # 这个目录/平台能识别吗？hardc 库根在哪？
+yamc ioc_parse -d <工程根>              # .ioc → 外设表 YAML
+yamc gen_code -d <工程根> -t buck       # 拓扑+外设 → app_main.c/h
+yamc cmake_inject -d <工程根> -t buck   # 注入 CMake
+yamc build -d <工程根>                  # 编译
+```
+
+**调参**：
+
+```bash
+yamc params list -d <工程根>                                    # 看有哪些参数变体
+yamc tune_static -d <工程根> --variant default --set pid_v.kp=2.0 --apply   # 静态改参(改代码)
+yamc serial list                                                # 找串口
+yamc serial tune --port COM5 --param pid_v.kp=2.0 -t buck       # 动态改参(运行时下发)
+```
 
 ---
 
-## 5. 常见问题排查
+## 📦 命令总览
 
-| 症状 | 原因 / 处理 |
-|------|------------|
-| `nmake: no such file or directory` | 生成器默认 NMake → `-G Ninja`（yamc 默认已是） |
-| `starm-clang: command not found` | 工具链不在 PATH → 加 `<stm32cube>\bundles\st-arm-clang\<ver>\bin`，重开终端 |
-| `unknown type name 'CAN_HandleTypeDef'` | CubeMX 未使能该 HAL → 工程 `set(HARDC_BSP "…")` 裁剪（见库根 HardC.CMake） |
-| `FAST_CTRL_IRQN … undeclared` | 三宏未探测到（NVIC 未开）→ 回 CubeMX 打开重跑 |
-| **`找不到 hardc 库根`** | 工具定位不到库 → 设 `HARDC_LIB_DIR` 或用 `--hardc-path`（§0） |
-| `HARDC_DIR` 路径不对 | 注入块首行 `set(HARDC_DIR …)` 应指向 submodule 相对路径（一般是 `Middlewares/Third_Party/HardC`） |
-| `target_link_libraries` 签名冲突 | CubeMX plain vs 注入 PRIVATE → 改 plain `target_link_libraries(${PROJECT_NAME} hardc)` |
-| bootloader `not a compile-time constant` | `Module/bootloader` 默认不编；要 OTA 才 `set(HARDC_ENABLE_BOOTLOADER ON)` |
-| 想合并 bootloader+app 单 `.hex` | `merge_firmware.py merge ...` 或 GUI 勾 Bootloader |
+**22 个独立命令**（`yamc <tool> <action> ...` 与 `yamc_<tool>_<action> ...` 等价）：
 
----
+| 组 | 命令 | 一句话 |
+|---|---|---|
+| **接入** | `cfg_run` / `gen_code` / `gen_bootloader` / `cmake_inject` / `build` | 一条龙接入 / 生成 App / Bootloader / 注入 CMake / 编译 |
+| **解析** | `parse` / `ioc_parse` / `syscfg_parse` | 平台感知分析 / STM32 .ioc / C2000 syscfg → 外设表 |
+| **工程生成** | `cubemx_generate` / `ccs_generate` | stm32 / c2000 工程自动重生成 |
+| **分区/烧录** | `flash list\|show\|gen` / `merge` | Flash 分区 → 链接脚本 / HEX 合并 |
+| **工具链** | `switch` | gcc ⇄ clang 切换（CMakePresets） |
+| **拓扑** | `topo list\|show\|gen` | 选拓扑 / 看 schema / 生成工程骨架 |
+| **脚手架** | `scaffold scan\|deps\|gen` | MANIFEST 扫描 / 依赖解析 / 骨架生成 |
+| **调参** | `params` / `tune_static` / `serial` | 参数变体 / 静态改参 / 动态(串口 0xFB) |
+| **诊断** | `probe` / `check` / `--version` | 探测环境 / 自检 / 版本 |
+| **GUI** | `gui` | 启动图形界面 |
 
-## 6. 红线（曾导致仓库损坏）
-
-- **禁止** `mklink /J <同名> <仓库根>` 同名 junction —— 曾致"仓库全丢"事故（lessons #74）。接入用 **git submodule 或 xcopy**。
-- 改了代码及时 **git commit + push**，别长期滞留未提交改动。
+退出码契约：`0` = 全部通过 / `1` = 失败 / `2` = 平台或依赖不支持。全局 `--debug`；多数命令 `-d` 缺省自当前目录向上找工程根。
 
 ---
 
-## 7. 相关路径（库根 hardc / 根容器 docs）
+## 💡 概念速览
 
-| 路径 | 内容 |
-|------|------|
-| （库根）`Config/topologies/*.yaml` | 拓扑定义（ready 才可生成） |
-| （库根）`Config/flash_map.yaml` | Flash 分区真相 |
-| （库根）`cmake/HardC.CMake` | 库接入（BSP/CORE 裁剪 + 平台链接） |
-| （库根）`cmake/*.cmake` | 工具链文件 |
-| （库根）`App/*.tmpl` | App 模板 |
-| [../docs](../docs) | 项目全部文档（设计原则/计划/子系统/历史） |
+- **拓扑（topology）**：一个电源/控制方案，如 `buck`（降压）、`supercap_3ph`（三相超级电容）。定义在 HardC 库根 `Config/topologies/<name>.yaml`，含 `status: ready` 才可生成。
+- **参数变体（variant）**：一组可注入的配置（`Config/params/*.yaml`），`config_id` 标识，改完「注入 C」写进 `app_main.c` 的 `CONFIG BEGIN/END` 区。
+- **静态调参**：改参数 → 重新注入 C 代码（编译期生效）。
+- **动态调参**：串口发 48 字节 0xFB 帧，按拓扑 params 的 `slot` 布局下发（运行期生效，不重编译）。
+
+hardc 库根定位顺序：`HARDC_LIB_DIR` 环境变量 → `--hardc-path` → 同级 `../hardc` → 工程内 submodule。校验：须含 `cmake/HardC.CMake`。
+
+---
+
+## 🧱 目录结构
+
+```
+YamC/
+├── pyproject.toml          # 打包配置（23 个命令入口）
+├── src/yamc/               # 源码（src-layout，与 libxr 一致）
+│   ├── cli.py              # 伞命令 + 全部 yamc_* 入口
+│   ├── engine.py           # 接入流水线编排
+│   ├── gen_app.py          # 拓扑+外设 → app_main.c/h
+│   ├── ioc_parse.py / c2000_syscfg.py   # 外设解析
+│   ├── params.py / serial_tune.py       # 静态/动态调参
+│   ├── yaml_config_builder.py           # PyQt6 GUI
+│   └── ...
+├── scripts/                # 冒烟脚本 & 兼容 shim
+└── tests/                  # pytest 套件
+```
+
+---
+
+## 🧪 开发
+
+```bash
+pip install ".[gui,serial]"
+pip install pytest
+pytest tests -q
+```
+
+CI（`.github/workflows/ci.yml`）在 Windows / Linux 上跑：安装 → 编译检查 → CLI 冒烟 → 全量测试。
+
+---
+
+## 📚 相关
+
+- **[HardC](https://github.com/youyan2000/HardC)** —— 零件库（C99 电源/电机控制组件）
+- **[YamC](https://github.com/youyan2000/YamC)** —— 本库：配置/接入/生成工具链
+
+## License
+
+MIT

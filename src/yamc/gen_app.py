@@ -23,7 +23,7 @@ from typing import Optional
 
 import yaml
 
-from yaml_config_builder import inject_config, render_config_block
+from .params import inject_config, render_config_block
 
 BSP_BEGIN = "/* YMAC BSP BEGIN */"
 BSP_END = "/* YMAC BSP END */"
@@ -98,6 +98,10 @@ def topo_to_power_cfg(topo: dict, params: Optional[dict] = None) -> dict:
         i_roles.sort(key=lambda r: int(r[0][1:]))
         if i_roles:
             power["adc_ch_i"] = [ch for _, ch in i_roles]
+    elif cm == "mod_vsi":
+        # mod_vsi 用 PwmSvpwm / AdcAcSampler 实例 (非 cfg 通道字段), 不映射 PWM/ADC 平铺.
+        # 非槽位控制/保护默认缺省由 mod_vsi_init 内部派生, 无需显式发射.
+        pass
     else:
         for field in ("ch_drive", "duty_min", "duty_max"):
             if field in pwm:
@@ -105,8 +109,6 @@ def topo_to_power_cfg(topo: dict, params: Optional[dict] = None) -> dict:
         for role, rcfg in roles.items():
             power["adc_ch_" + role] = rcfg["ch"]
     return power
-
-
 def render_power_config(topo: dict, params: Optional[dict] = None) -> tuple[str, str]:
     """拓扑 → {power: ...} 渲染 C 块 + config_id. 拓扑含 share: 段时一并渲染 (.share)."""
     power = topo_to_power_cfg(topo, params)
@@ -134,7 +136,11 @@ def gen_bsp_block(topo: dict, periph: dict) -> str:
     else:
         lines.append(f"// WARN: 未知 PWM 设备 {pwm_cfg.get('device')} — 跳过 PWM 绑定")
     adc_cfg = topo.get("adc") or {}
-    lines.extend(_gen_adc(adc_cfg, periph))
+    adc_dev = adc_cfg.get("device", "adc_dc_sampler")
+    if adc_dev == "adc_ac_sampler":
+        lines.extend(_gen_adc_ac_sampler(adc_cfg, periph))
+    else:
+        lines.extend(_gen_adc(adc_cfg, periph))
     comm_cfg = topo.get("comm") or {}
     if comm_cfg.get("can"):
         lines.extend(_gen_can(comm_cfg, periph))
@@ -291,6 +297,56 @@ def _gen_adc(adc_cfg: dict, periph: dict) -> list[str]:
     return lines
 
 
+def _gen_adc_ac_sampler(adc_cfg: dict, periph: dict) -> list[str]:
+    """三相交流采样 (adc_device=adc_ac_sampler) 绑定生成. vsi_3ph 用.
+
+    roles 约定: 电流角色 i_* (i_a/i_b/...), 电压角色 v_* 或 vdc/vab (差分),
+    取前 num_v 个电压通道做线电压重构. 每个角色带 ch/gain.
+    """
+    roles = adc_cfg.get("roles") or {}
+    if not roles:
+        return []
+    adcs = periph["peripherals"]["adc"]
+    if not adcs:
+        return ["// WARN: .ioc 无 ADC — 未生成 AC 采样绑定"]
+    adc = adcs[0]
+
+    # 按角色名分电流/电压 (i_* 前缀 = 电流, 其余含 'v' 或 'vdc'/'vab' = 电压)
+    i_roles = [(k, v) for k, v in roles.items() if k.startswith("i_")]
+    v_roles = [(k, v) for k, v in roles.items() if not k.startswith("i_")]
+    # vsi_3ph: 期望 ia/ib + vdc/vab. 预取三相线电压重构需要 idx_vab, idx_vbc — 这里简化为按名
+    if not i_roles or not v_roles:
+        return ["// WARN: adc_ac_sampler roles 需电流 + 电压角色 (vsi 拓扑预期 i_a/v_ab 形) — 未生成"]
+    # 稳定排序 (按 ch) 保证通道序与拓扑一致
+    i_roles.sort(key=lambda r: r[1]["ch"])
+    v_roles.sort(key=lambda r: r[1]["ch"])
+
+    num_i = len(i_roles)
+    num_v = len(v_roles)
+    i_ch = ",".join(str(r[1]["ch"]) for r in i_roles)
+    v_ch = ",".join(str(r[1]["ch"]) for r in v_roles)
+    i_gain = ",".join(f"{r[1].get('gain', 1.0):.4f}f" for r in i_roles)
+    v_gain = ",".join(f"{r[1].get('gain', 1.0):.4f}f" for r in v_roles)
+
+    max_rank = max(v["ch"] for v in roles.values())
+    num_ch = max_rank + 1
+    dma = adc.get("dma") or {}
+    dma_handle = f"&{dma['handle']}" if dma.get("handle") else "NULL"
+
+    lines = [
+        f"// ADC {adc['instance']} (三相交流: {num_i} 电流 + {num_v} 电压, {num_ch} 总通道)",
+        f"static const uint8_t ac_i_ch[{num_i}] = {{{i_ch}}};",
+        f"static const uint8_t ac_v_ch[{num_v}] = {{{v_ch}}};",
+        f"static const float ac_i_gain[{num_i}] = {{{i_gain}}};",
+        f"static const float ac_v_gain[{num_v}] = {{{v_gain}}};",
+        f"adc_ac_sampler_init(&g_root.drv_ac_adc, IO_ASYNC_FLAG, &{adc['handle']}, {dma_handle},",
+        f"                    {num_ch}, {num_v}, {num_i}, ac_i_ch, ac_v_ch, 0, ac_v_gain, NULL, ac_i_gain, NULL);",
+    ]
+    for role, rcfg in roles.items():
+        lines.append(f"//   {role} → CH{rcfg['ch']} (gain {rcfg.get('gain', 1.0)})")
+    return lines
+
+
 def _gen_can(comm_cfg: dict, periph: dict) -> list[str]:
     """comm.can 段 → CAN 设备绑定 (can_init 挂 HAL 句柄). 订阅分发接缝在 MODULES 锚点 (spec §4.8.4)."""
     cans = periph.get("peripherals", {}).get("can")
@@ -303,8 +359,76 @@ def _gen_can(comm_cfg: dict, periph: dict) -> list[str]:
     ]
 
 
+# ======== SVPWM / SPWM 六开关逆变绑定生成器 ========
+# vsi_3ph 拓扑 (pwm.device: pwm_svpwm): 三相 6 开关逆变, 3 个互补半桥定时器.
+# SVPWM 设备 (Devices/pwm/pwm_svpwm.c) 用单个 bsph 句柄 + 依赖 .ioc 预配定时器.
+#   发波仅 svpwm_set_vector(v_alpha_pu, v_beta_pu, v_dc) 写占空比; 周期/死区走
+#   外层 bsp_pwm_set_freq_hz / bsp_pwm_set_deadtime_ns (需 handle 已绑定).
+
+def _gen_pwm_svpwm(pwm_cfg: dict, periph: dict) -> list[str]:
+    freq = int(pwm_cfg.get("freq_hz", 20000))
+    deadtime = int(pwm_cfg.get("deadtime_ns", 500))
+    dpwm = str(pwm_cfg.get("dpwm_mode", "7Seg"))
+
+    hrtims = periph["peripherals"]["hrtim"]
+    if not hrtims:
+        return ["// WARN: .ioc 无 HRTIM — 未生成 SVPWM 绑定"]
+    hrtim = hrtims[0]
+    clk_hz = int(hrtim.get("clk_hz") or 0)
+    clk_src = "SystemCoreClock" if not clk_hz else f"{clk_hz}u"
+
+    # 3 相半桥 → 定时器 A/B/C + 互补掩码
+    legs = [(f"BSP_TIMER_{chr(ord('A')+i)}", f"mask_{chr(ord('a')+i)}") for i in range(3)]
+    mask_map = {"mask_a": "BSP_OUT_TIMER_A_PAIR",
+                "mask_b": "BSP_OUT_TIMER_B_PAIR",
+                "mask_c": "BSP_OUT_TIMER_C_PAIR"}
+    timer_map = {"mask_a": "BSP_TIMER_A", "mask_b": "BSP_TIMER_B", "mask_c": "BSP_TIMER_C"}
+
+    return [
+        f"// {hrtim['instance']} 三相 6 开关 — {freq} Hz SVPWM ({dpwm} 段), 3 定时器 A/B/C",
+        f"svpwm_init(&g_root.drv_svpwm, {freq}u, {deadtime}u,",
+        f"            {timer_map['mask_a']}, {mask_map['mask_a']},",
+        f"            {timer_map['mask_b']}, {mask_map['mask_b']},",
+        f"            {timer_map['mask_c']}, {mask_map['mask_c']});",
+        # svpwm_init 将 bsph 置 NULL → 绑定 handle + 重设频率/死区
+        f"g_root.drv_svpwm.bsph = &{hrtim['handle']};",
+        f"svpwm_set_mode(&g_root.drv_svpwm, SvpwmMode_{dpwm});",
+        f"pwm_set_freq(&g_root.drv_svpwm.base, {freq}u);",
+        f"pwm_set_deadtime(&g_root.drv_svpwm.base, {deadtime}u);",
+    ]
+
+
+def _gen_pwm_spwm(pwm_cfg: dict, periph: dict) -> list[str]:
+    """SPWM (单相/三相正弦调制) 绑定. vsi_3ph 若 device=pwm_spwm 则 3 相 3 半桥."""
+    freq = int(pwm_cfg.get("freq_hz", 20000))
+    deadtime = int(pwm_cfg.get("deadtime_ns", 500))
+    num_arms = int(pwm_cfg.get("num_arms", 3))
+
+    hrtims = periph["peripherals"]["hrtim"]
+    if not hrtims:
+        return ["// WARN: .ioc 无 HRTIM — 未生成 SPWM 绑定"]
+    hrtim = hrtims[0]
+
+    pairs = [("BSP_TIMER_%c" % chr(ord('A') + i),
+              "BSP_OUT_TIMER_%c_PAIR" % chr(ord('A') + i)) for i in range(num_arms)]
+    cfg_lines = ",\n                 ".join("{%s, %s}" % p for p in pairs)
+    return [
+        f"// {hrtim['instance']} {num_arms} 相正弦调制 — {freq} Hz SPWM, {num_arms} 互补半桥",
+        f"static const PwmSpwmArmCfg vsi_spwm_arms[{num_arms}] = {{",
+        f"    {cfg_lines},",
+        "};",
+        f"pwm_spwm_init(&g_root.drv_spwm, {freq}u, {deadtime}u, {num_arms}, vsi_spwm_arms);",
+        f"g_root.drv_spwm.bsp_cfg.handle = &{hrtim['handle']};",
+        f"g_root.drv_spwm.bsp_cfg.clk_hz = {int(hrtim.get('clk_hz') or 0)}u;",
+        f"pwm_spwm_set_freq(&g_root.drv_spwm, {freq}u);",
+        f"pwm_spwm_set_deadtime(&g_root.drv_spwm, {deadtime}u);",
+    ]
+
+
 _PWM_DEVICE_GEN = {
     "pwm_buckboost": _gen_pwm_buckboost,
+    "pwm_svpwm": _gen_pwm_svpwm,
+    "pwm_spwm": _gen_pwm_spwm,
 }
 
 
@@ -451,10 +575,77 @@ def _gen_mod_supercap(topo: dict) -> tuple[str, str, str]:
     return c_block, h_cfgstruct, h_root
 
 
-_MODULE_GEN = {
-    "mod_supercap": _gen_mod_supercap,
+_VSI_C_TEMPLATE = """static void modules_apply_config(void) {
+  g_root.vsi.cfg = g_cfg.power;
+  mod_vsi_sync_cfg(&g_root.vsi);
 }
 
+static void modules_board_init(void) {
+  // ModVsi 实例化 (cfg 来自 g_cfg.power) + 绑定 SVPWM/AC采样设备
+  mod_vsi_init(&g_root.vsi, &g_cfg.power, /*grid_freq_hz=*/__GRID_HZ__);
+  mod_vsi_bind(&g_root.vsi, &g_root.drv_svpwm, &g_root.drv_ac_adc);
+  // 0xFB 串口调参: 槽位 0-9 → g_cfg.power → apply_config
+  pid_tune_set_apply_cb(on_pid_tune_received);
+}
+
+static void modules_fast_tick(void) {
+  // 先采样快照 (AC transient 快照交接), 再 VSI 控制 (PLL→dq→SVPWM 发波)
+  adc_ac_sampler_fast_fetch(&g_root.drv_ac_adc);
+  mod_vsi_tick(&g_root.vsi);
+}
+
+static void modules_slow_tick(void) {
+  // 心跳 → 喂狗 (监控三件套; FAST 已 Heartbeat_Tick, SLOW 判死锁)
+  if (!Heartbeat_Check(&g_root.heartbeat, 100))
+    bsp_watchdog_feed();
+  // 遥测: FAST→SLOW Latest 锁存 (监控面读 vdc 快照)
+  (void) latch_peek(&g_root.vsi.telemetry);
+}
+
+static void modules_main_loop(void) {
+  // 保护事件排空 (SPSC 环, FAST 单生产者; 事件字节 = comp_error.h 位掩码)
+  uint8_t ev;
+  while (mod_vsi_evt_pop(&g_root.vsi, &ev))
+    log_evt(ev);
+}
+
+static void modules_apply_tune(const float coef[10]) {
+  // 槽位 0-9 → g_cfg.power (同步回配置, 下次 YAML 注入保持一致)
+  // 槽位映射与 Config/topologies/__TOPOLOGY__.yaml params.slot 一致
+__TUNE_BODY__
+  // 同步到运行时实例 (整体拷贝 + PI 限幅派生)
+  apply_config();
+}"""
+
+
+def _gen_mod_vsi(topo: dict) -> tuple[str, str, str]:
+    """vsi_3ph: MODULES 锚点 + .h 锚点 (CFGSTRUCT/ROOT). dq 电流环 + SVPWM 发波."""
+    params = topo.get("params") or []
+    slots = sorted((p for p in params if p.get("slot") is not None), key=lambda p: p["slot"])
+    tune_body = "\n".join(f"  g_cfg.power.{p['key']} = coef[{p['slot']}];" for p in slots)
+    name = str(topo.get("name") or "?")
+    grid_hz = float(topo.get("grid_freq_hz", 50.0))
+    c_block = (_VSI_C_TEMPLATE.replace("__TOPOLOGY__", name)
+               .replace("__TUNE_BODY__", tune_body)
+               .replace("__GRID_HZ__", f"{grid_hz}f"))
+    h_cfgstruct = (f"typedef ModVsiCfg PowerCfg;  // 拓扑主控制模块 "
+                   f"(control_module: {topo.get('control_module')})")
+    adc = topo.get("adc") or {}
+    h_root = (
+        f"// ==== 由 yamc_cfg 生成: 电源域根成员 (拓扑={name}) ====\n"
+        f"// --- Power-OOP: 电力电子设备 ---\n"
+        f"PwmSvpwm drv_svpwm;     // 三相 6 开关逆变 PWM (pwm_svpwm.h)\n"
+        f"AdcAcSampler drv_ac_adc; // 三相交流采样 (adc_ac_sampler.h)\n"
+        f"// --- Power-OOP: 电源控制 Module ---\n"
+        f"ModVsi vsi;             // 三相 VSI 控制 (mod_vsi.h)"
+    )
+    return c_block, h_cfgstruct, h_root
+
+
+_MODULE_GEN = {
+    "mod_supercap": _gen_mod_supercap,
+    "mod_vsi": _gen_mod_vsi,
+}
 
 # ======== BSP 绑定块生成 (C2000 分支, driverlib) ========
 

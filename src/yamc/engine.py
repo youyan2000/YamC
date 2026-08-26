@@ -18,11 +18,11 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
-from cmake_integrate import compute_devices, inject_cmake_integration, series_from_family
-from gen_app import gen_app, gen_bootloader, load_topology
-from ioc_parse import cache_path_for, load_or_parse, probe_irq_macros
-from project_probe import detect_platform, find_ioc, find_project_root
-from c2000_syscfg import cache_path_for as c2_cache_path_for, load_or_parse as c2_load_or_parse
+from .cmake_integrate import compute_devices, inject_cmake_integration, series_from_family
+from .gen_app import gen_app, gen_bootloader, load_topology
+from .ioc_parse import cache_path_for, load_or_parse, probe_irq_macros
+from .project_probe import detect_platform, find_ioc, find_project_root
+from .c2000_syscfg import cache_path_for as c2_cache_path_for, load_or_parse as c2_load_or_parse
 
 LogFn = Callable[[str, str], None]
 
@@ -224,15 +224,18 @@ def _probe_c2000_sdk(root: Path, log: LogFn) -> Optional[str]:
 # ======== 流水线编排 ========
 
 def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
-                 opts: Optional[dict] = None, log: Optional[LogFn] = None) -> dict:
+                 opts: Optional[dict] = None, log: Optional[LogFn] = None,
+                 stop_after: int = 7) -> dict:
     """在外部工程根执行完整接入流水线.
 
     start:   探测起点目录 (CLI -d / GUI 目录选择器)
     topology: 拓扑名 (Config/topologies/<name>.yaml)
     params:  参数 dict 覆盖拓扑默认; 平铺 {'vref': 12.5, 'pid_v.kp': 2.0} 或
              嵌套 {'power': {...}} (GUI 表单) 均可, 内部归一化平铺
-    opts:   {no_submodule, hardc_path, git_source, no_build, out_rel}
+    opts:   {no_submodule, hardc_path, git_source, no_build, out_rel, gen_bootloader}
     log:    日志回调 (level, msg); 默认打印 [LEVEL] msg
+    stop_after: 阶段数, 完成该阶段后早退 (ok=True, stop_after=N):
+              1=探测 2=接入 3=解析 4=生成 5=bootloader 6=CMake 7=构建(=全流程, 默认)
 
     返回: {ok, exit_code, reason?, root, platform, hardc, app_c, config_id,
            cmake_inserted, cmake_old_integration, built}
@@ -244,8 +247,19 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
     git_source = opts.get("git_source")
     no_build = bool(opts.get("no_build", False))
     out_rel = str(opts.get("out_rel", "User/Application"))
+    gen_bootloader_force = bool(opts.get("gen_bootloader", False))
 
     out: dict = {"ok": False, "exit_code": 1}
+
+    def _checkpoint(n: int) -> bool:
+        """stop_after 语义: 完成第 n 阶段后若达到目标, 置成功并返回 True (调用方 return)."""
+        if stop_after <= n:
+            out["ok"] = True
+            out["exit_code"] = 0
+            out["stop_after"] = n
+            return True
+        return False
+
     try:
         # 1. 探测
         logger("info", f"拓扑: {topology}")
@@ -258,12 +272,16 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
             raise PipelineError(f"{root} 未识别平台 (需 .ioc / main.syscfg / .syscfg)", exit_code=2)
         logger("pass", f"平台: {platform}")
         out["platform"] = platform
+        if _checkpoint(1):
+            return out
 
         # 2. HardC 接入
         logger("info", "接入 HardC (git submodule)")
         hardc = ensure_hardc_dir(root, logger, no_submodule, hardc_path, git_source)
         logger("pass", f"HardC: {hardc}")
         out["hardc"] = str(hardc)
+        if _checkpoint(2):
+            return out
 
         # 3. 外设解析 (平台分派)
         sdk_dir = None
@@ -285,6 +303,8 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
             sdk_dir = opts.get("sdk_dir") or _probe_c2000_sdk(root, logger)
         else:
             raise PipelineError(f"不支持平台: {platform}", exit_code=2)
+        if _checkpoint(3):
+            return out
 
         # 4. 拓扑 + 生成
         try:
@@ -299,17 +319,21 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
         logger("pass", f"app_main.c 生成 (config_id={result['config_id']})")
         out["app_c"] = str(result["app_c"])
         out["config_id"] = result["config_id"]
+        if _checkpoint(4):
+            return out
 
-        # 4b. Bootloader (拓扑 bootloader.enable → 物化 bootloader_main.c/h 到同 out_dir)
+        # 4b. Bootloader (拓扑 bootloader.enable 或 opts.gen_bootloader → 物化 bootloader_main.c/h 到同 out_dir)
         bl_cfg = topo.get("bootloader") or {}
-        if isinstance(bl_cfg, dict) and bl_cfg.get("enable"):
-            logger("info", f"Bootloader 启用 — 生成 bootloader_main.c/h (up_port={bl_cfg.get('up_port','uart')})")
+        if (isinstance(bl_cfg, dict) and bl_cfg.get("enable")) or gen_bootloader_force:
+            logger("info", f"Bootloader 启用 — 生成 bootloader_main.c/h (up_port={bl_cfg.get('up_port','uart') if isinstance(bl_cfg, dict) else 'uart'})")
             bl = gen_bootloader(topo, periph, hardc, out_dir)
             logger("pass", f"bootloader_main.c/h 生成 → {bl['bl_c'].relative_to(root)}")
             out["bl_c"] = str(bl["bl_c"])
             out["bl_h"] = str(bl["bl_h"])
         else:
             logger("info", "Bootloader 未启用 (拓扑缺 bootloader.enable 或 false), 跳过")
+        if _checkpoint(5):
+            return out
 
         # 5. CMake 集成 (平台分派: st → HARDC_STM32_SERIES; c2000 → C2000_SDK_DIR)
         cm = root / "CMakeLists.txt"
@@ -338,6 +362,8 @@ def run_pipeline(start: Path, topology: str, params: Optional[dict] = None,
         if r["old_integration"]:
             logger("warn", "检测到旧版 User/Components... 手工集成, 请手工移除后重跑")
         logger("pass", f"CMake 集成: {'插入' if r['inserted'] else '更新'} HardC 块 ({extra})")
+        if _checkpoint(6):
+            return out
 
         # 6. 构建
         if no_build:

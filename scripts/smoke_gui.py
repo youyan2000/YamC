@@ -9,12 +9,13 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, str(Path(__file__).parent))
+# 包在 src/yamc/（src-layout）: 把 ../src 加进 sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
-import yaml_config_builder as ycb
+from yamc import yaml_config_builder as ycb
 
 results: dict = {}
 

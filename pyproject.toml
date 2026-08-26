@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yamc"
+version = "0.2.0"
+description = "HardC 配置与接入工具链: YAML → C 注入 + 拓扑生成 + 外部 CubeMX/CCS 工程接入 + 双固件/OTA 编排"
+requires-python = ">=3.9"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = [
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt6", "darkdetect"]
+serial = ["pyserial"]
+
+[project.scripts]
+yamc = "yamc.cli:umbrella_main"
+yamc_cfg_run = "yamc.cli:cmd_cfg_run"
+yamc_parse = "yamc.cli:cmd_parse"
+yamc_ioc_parse = "yamc.cli:cmd_ioc_parse"
+yamc_syscfg_parse = "yamc.cli:cmd_syscfg_parse"
+yamc_gen = "yamc.cli:cmd_gen"
+yamc_gen_code = "yamc.cli:cmd_gen_code"
+yamc_gen_bootloader = "yamc.cli:cmd_gen_bootloader"
+yamc_cmake_inject = "yamc.cli:cmd_cmake_inject"
+yamc_flash = "yamc.cli:cmd_flash"
+yamc_switch = "yamc.cli:cmd_switch"
+yamc_cubemx_generate = "yamc.cli:cmd_cubemx_generate"
+yamc_ccs_generate = "yamc.cli:cmd_ccs_generate"
+yamc_probe = "yamc.cli:cmd_probe"
+yamc_check = "yamc.cli:cmd_check"
+yamc_topo = "yamc.cli:cmd_topo"
+yamc_scaffold = "yamc.cli:cmd_scaffold"
+yamc_merge = "yamc.cli:cmd_merge"
+yamc_build = "yamc.cli:cmd_build"
+yamc_params = "yamc.cli:cmd_params"
+yamc_tune_static = "yamc.cli:cmd_tune_static"
+yamc_serial = "yamc.cli:cmd_serial"
+yamc_gui = "yamc.cli:cmd_gui"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

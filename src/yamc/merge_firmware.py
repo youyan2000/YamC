@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 # ---- 常量 ----
 
@@ -291,7 +292,7 @@ def cmd_merge(args):
 
 # ---- CLI ----
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
   parser = argparse.ArgumentParser(
     prog="merge_firmware",
     description="把 bootloader.hex + app.hex（等）合并成一个 Intel HEX 烧录映像",
@@ -311,7 +312,7 @@ def main() -> int:
 
   sub.add_parser("selftest", help="运行内置往返自检")
 
-  args = parser.parse_args()
+  args = parser.parse_args(argv)
 
   try:
     if args.command == "merge":

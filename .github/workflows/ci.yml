@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tool + test deps
+        run: |
+          pip install --upgrade pip
+          pip install .
+          pip install pytest
+
+      - name: Compile check (src / scripts / tests)
+        run: |
+          python -c "import py_compile,pathlib; \
+          [py_compile.compile(str(p), doraise=True) \
+           for p in [*pathlib.Path('src').rglob('*.py'), \
+                     *pathlib.Path('scripts').glob('*.py'), \
+                     *pathlib.Path('tests').glob('*.py')]]"
+
+      - name: CLI surface check
+        run: |
+          yamc --version
+          yamc --help
+          yamc check
+
+      - name: Run pytest suite
+        run: pytest tests -q -p no:cacheprovider

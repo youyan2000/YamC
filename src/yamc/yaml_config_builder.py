@@ -36,401 +36,25 @@ from typing import Any, Optional
 
 import yaml
 
-# ── Constants ──────────────────────────────────────────────────
-BEGIN_MARKER = "/* CONFIG BEGIN */"
-END_MARKER = "/* CONFIG END */"
-CONFIG_ID_PATTERN = re.compile(r"/\*\s*config:\s*(.+?)\s*\*/")
-C_IDENTIFIER_PATTERN = re.compile(r"^[A-Z][A-Za-z0-9_]*$")
-# A valid C identifier/macro: starts with uppercase, only alphanum + underscore
-# e.g. BSP_ADC_VA, BSP_ADC_Ialpha, DT, CAP_MAX_VOLTAGE
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Project Discovery
-# ═══════════════════════════════════════════════════════════════
-
-# 工具支持的 legacy 目标子目录（按优先级排列）
-_APP_SUBDIRS = [
-    ("User", "app"),
-    ("User", "Application"),
-]
-# HardC 布局特征目录：Config/ + App/（拓扑/工程/参数 三层 YAML）
-_HARDC_DIRS = ("Config", "App")
-
-
-def _first_app_dir(project_root: Path) -> Optional[Path]:
-    """返回第一个存在的 User/app/ 或 User/Application/ 目录。"""
-    for seg1, seg2 in _APP_SUBDIRS:
-        d = project_root / seg1 / seg2
-        if d.is_dir():
-            return d
-    return None
-
-
-def _is_hardc_root(root: Path) -> bool:
-    """判断是否为 HardC 仓库根（Config/ + App/ 同时存在）。"""
-    return all((root / name).is_dir() for name in _HARDC_DIRS)
-
-
-def _find_materialized_target(project_root: Path) -> Optional[Path]:
-    """在 build/gen/<name>/ 下查找最近物化的 app_main.c（Tab1 注入目标优先）。"""
-    gen_dir = project_root / "build" / "gen"
-    if not gen_dir.is_dir():
-        return None
-    candidates = [p for p in gen_dir.glob("*/app_main.c") if p.is_file()]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
-
-
-def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
-    """从 start 向上搜索项目根。
-
-    双模式识别：
-    - legacy：含 conf/ 和 User/app/ 或 User/Application/
-    - HardC：含 Config/ 和 App/
-    """
-    here = Path(start or os.getcwd()).resolve()
-    for parent in [here] + list(here.parents):
-        if (parent / "conf").is_dir() and _first_app_dir(parent) is not None:
-            return parent
-        if _is_hardc_root(parent):
-            return parent
-    return None
-
-
-def find_target_file(project_root: Path) -> Optional[Path]:
-    """查找注入目标文件。
-
-    HardC 优先返回 build/gen/<name>/app_main.c（物化副本）；
-    legacy 保持原有 User/app/ 或 User/Application/ 扫描逻辑。
-    """
-    if _is_hardc_root(project_root):
-        materialized = _find_materialized_target(project_root)
-        if materialized is not None:
-            return materialized
-
-    for seg1, seg2 in _APP_SUBDIRS:
-        app_dir = project_root / seg1 / seg2
-        if not app_dir.is_dir():
-            continue
-
-        # 优先 app_main.c
-        default = app_dir / "app_main.c"
-        if default.is_file():
-            return default
-
-        # 扫描所有 .c 文件
-        for c_file in sorted(app_dir.glob("*.c")):
-            try:
-                content = c_file.read_text(encoding="utf-8")
-                if BEGIN_MARKER in content and END_MARKER in content:
-                    return c_file
-            except Exception:
-                continue
-
-    return None
-
-
-# ═══════════════════════════════════════════════════════════════
-#  YAML → C 渲染引擎
-# ═══════════════════════════════════════════════════════════════
-
-def _is_c_identifier(val: str) -> bool:
-    """全大写 + 下划线开头 → 视为 C 枚举 / 宏标识符。"""
-    return bool(C_IDENTIFIER_PATTERN.match(val))
-
-
-def _format_float(val: float) -> str:
-    """float → C 字面量，负数加括号。"""
-    text = f"{val:.10f}f"
-    if val < 0:
-        return f"({text})"
-    return text
-
-
-def render_value(value: Any, indent_level: int, indent_step: int = 4) -> str:
-    """递归渲染单个 YAML 值为 C 字面量字符串。
-
-    参数
-    ----
-    value : 任意 YAML 节点
-    indent_level : 当前缩进级别（0 = 顶层字段值）
-    indent_step  : 每级缩进空格数（默认 4）
-    """
-    prefix = " " * (indent_level * indent_step)
-
-    if isinstance(value, dict):
-        items = list(value.items())
-        if not items:
-            return "{}"
-        lines = ["{"]
-        for key, val in items:
-            rendered = render_value(val, indent_level + 1, indent_step)
-            if isinstance(val, dict):
-                lines.append(f"{prefix}{' ' * indent_step}.{key} = {rendered},")
-            else:
-                lines.append(f"{prefix}{' ' * indent_step}.{key} = {rendered},")
-        lines.append(f"{prefix}}}")
-        return "\n".join(lines)
-
-    if isinstance(value, list):
-        items = [render_value(v, indent_level, indent_step) for v in value]
-        inner = ", ".join(items)
-        return f"{{ {inner} }}"
-
-    if isinstance(value, bool):
-        return "true" if value else "false"
-
-    if isinstance(value, int):
-        return str(value)
-
-    if isinstance(value, float):
-        return _format_float(value)
-
-    if isinstance(value, str):
-        if _is_c_identifier(value):
-            return value
-        return f'"{value}"'
-
-    return str(value)
-
-
-def render_config_block(config: dict, indent_step: int = 4) -> str:
-    """将 YAML `config:` 树渲染为 C designated initializer 块。
-
-    顶层 key 展开为独立条目，用于替换标记之间的内容。
-    """
-    items = list(config.items())
-    if not items:
-        return ""
-
-    lines: list[str] = []
-    for i, (key, val) in enumerate(items):
-        rendered = render_value(val, indent_level=1, indent_step=indent_step)
-        comma = "," if i < len(items) - 1 else ""
-        if isinstance(val, dict):
-            lines.append(f"    .{key} = {rendered}{comma}")
-        else:
-            lines.append(f"    .{key} = {rendered}{comma}")
-    return "\n".join(lines)
-
-
-# ═══════════════════════════════════════════════════════════════
-#  File I/O
-# ═══════════════════════════════════════════════════════════════
-
-def scan_configs(conf_dir: Path) -> list[dict]:
-    """扫描目录下 *.yaml，返回 [{path, config_id, description, config}, ...]。
-
-    兼容 legacy conf/*.yaml 与 HardC Config/params/*.yaml（schema 均为
-    config_id/description/config）。排除以 _example 或 _template 结尾的文件。
-    """
-    result: list[dict] = []
-    for p in sorted(conf_dir.glob("*.yaml")):
-        if p.stem.endswith("_example") or p.stem.endswith("_template"):
-            continue
-        try:
-            with open(p, "r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-        except Exception:
-            continue
-
-        if not isinstance(data, dict):
-            continue
-        if "config" not in data:
-            continue
-
-        result.append({
-            "path": p,
-            "config_id": data.get("config_id", p.stem),
-            "description": data.get("description", ""),
-            "config": data["config"],
-        })
-    return result
-
-
-def flatten_config_tree(node, prefix: str = "", out=None) -> list[tuple[str, object]]:
-    """把嵌套 config dict 拍平成 [(dotted_key, value), ...]，叶子按 key.join('.') 排序。
-
-    供 Tab1「参数注入」可编辑参数表使用：行 = 参数名(点分路径) + 当前值。
-    """
-    if out is None:
-        out = []
-    for key, val in node.items():
-        dotted = f"{prefix}.{key}" if prefix else key
-        if isinstance(val, dict):
-            flatten_config_tree(val, dotted, out)
-        else:
-            out.append((dotted, val))
-    return out
-
-
-def unflatten_config_tree(flat: list[tuple[str, object]]) -> dict:
-    """把 flatten_config_tree 的结果还原成嵌套 dict（点分 key 拆层）。"""
-    root: dict = {}
-    for dotted, val in flat:
-        parts = dotted.split(".")
-        cur = root
-        for p in parts[:-1]:
-            cur = cur.setdefault(p, {})
-        cur[parts[-1]] = val
-    return root
-
-
-def detect_current_config(target_file: Path) -> Optional[str]:
-    """读取目标文件，从 CONFIG BEGIN 后提取 /* config: xxx */ 标记。"""
-    try:
-        content = target_file.read_text(encoding="utf-8")
-    except Exception:
-        return None
-
-    begin_idx = content.find(BEGIN_MARKER)
-    if begin_idx == -1:
-        return None
-    end_idx = content.find(END_MARKER, begin_idx)
-    if end_idx == -1:
-        return None
-
-    block = content[begin_idx:end_idx]
-    m = CONFIG_ID_PATTERN.search(block)
-    if m:
-        return m.group(1).strip()
-    return None
-
-
-def inject_config(target_file: Path, rendered: str, config_id: str) -> bool:
-    """将渲染后的 C 块注入目标文件的 CONFIG BEGIN/END 标记之间。"""
-    try:
-        original = target_file.read_text(encoding="utf-8")
-    except Exception:
-        return False
-
-    begin_idx = original.find(BEGIN_MARKER)
-    if begin_idx == -1:
-        return False
-
-    end_idx = original.find(END_MARKER, begin_idx)
-    if end_idx == -1:
-        return False
-
-    # 提取 BEGIN 行的缩进用作基准
-    line_start = original.rfind("\n", 0, begin_idx) + 1
-    indent = original[line_start:begin_idx]
-
-    # 构建新块：BEGIN → config 注释 → 渲染内容 → END
-    new_block = (
-        f"{indent}{BEGIN_MARKER}\n"
-        f"{indent}/* config: {config_id} */\n"
-        f"{rendered}\n"
-        f"{indent}{END_MARKER}"
-    )
-
-    updated = original[:line_start] + new_block + original[end_idx + len(END_MARKER):]
-    try:
-        target_file.write_text(updated, encoding="utf-8")
-        return True
-    except Exception:
-        return False
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Build System
-# ═══════════════════════════════════════════════════════════════
-
-def detect_build(project_root: Path) -> Optional[dict]:
-    """自动检测构建系统。支持 CMake（build/ 子目录）。"""
-    for build_dir_name in ("build", "build/Debug", "build/Release"):
-        bd = project_root / build_dir_name
-        if (bd / "CMakeCache.txt").is_file():
-            return {
-                "type": "cmake",
-                "dir": str(bd),
-                "label": build_dir_name,
-            }
-    build_root = project_root / "build"
-    if build_root.is_dir():
-        for child in sorted(build_root.iterdir()):
-            if child.is_dir() and (child / "CMakeCache.txt").is_file():
-                return {
-                    "type": "cmake",
-                    "dir": str(child),
-                    "label": f"build/{child.name}",
-                }
-    return None
-
-
-def find_cmake() -> Optional[str]:
-    """查找 cmake 可执行文件路径。
-
-    先尝试 PATH，再搜索常见安装位置（含 ARM 工具链）。
-    """
-    import shutil
-
-    cmake = shutil.which("cmake")
-    if cmake:
-        return cmake
-
-    # 同时尝试搜索所有盘符下的常见工具链目录
-    candidates: list[str] = []
-
-    if sys.platform == "win32":
-        # 扫描所有盘符下的常见目录
-        import glob as _glob
-        drive_patterns = [
-            r"{drive}:\Program Files\CMake\bin\cmake.exe",
-            r"{drive}:\Program Files (x86)\CMake\bin\cmake.exe",
-            r"{drive}:\GNU_C_Compiler\bin\cmake.exe",
-            r"{drive}:\GNU Arm Embedded Toolchain\bin\cmake.exe",
-            r"{drive}:\ST\STM32CubeIDE_*\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.*\tools\bin\cmake.exe",
-        ]
-        # 扫描 A-Z 盘符
-        import string as _string
-        for letter in _string.ascii_uppercase:
-            for pattern in drive_patterns:
-                p = pattern.format(drive=letter)
-                # 用 glob 匹配通配符路径
-                if "*" in p:
-                    for matched in _glob.glob(p):
-                        candidates.append(matched)
-                else:
-                    candidates.append(p)
-
-        # VS 2022 自带 CMake
-        vs_cmake = (
-            r"{drive}:\Program Files\Microsoft Visual Studio\2022"
-            r"\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-        )
-        for letter in _string.ascii_uppercase:
-            p = vs_cmake.format(drive=letter)
-            candidates.append(p)
-
-        # cmake 可能在任何 CMake* 目录下
-        for letter in _string.ascii_uppercase:
-            for base in [f"{letter}:\\Program Files", f"{letter}:\\Program Files (x86)"]:
-                for matched in _glob.glob(f"{base}\\CMake*\\bin\\cmake.exe"):
-                    candidates.append(matched)
-
-    # Linux
-    for c in ["/usr/bin/cmake", "/usr/local/bin/cmake", "/snap/bin/cmake"]:
-        candidates.append(c)
-
-    for c in candidates:
-        if Path(c).is_file():
-            return c
-
-    return None
-
-
-def build_command(build_info: dict) -> list[str]:
-    """根据构建信息生成 cmake --build 命令。优先使用 find_cmake()。"""
-    cmake_path = find_cmake() or "cmake"
-    return [cmake_path, "--build", build_info["dir"]]
-
-
-# ═══════════════════════════════════════════════════════════════
-#  CLI
-# ═══════════════════════════════════════════════════════════════
+from .build import build_command, detect_build, find_cmake
+from .params import (
+    BEGIN_MARKER,
+    C_IDENTIFIER_PATTERN,
+    END_MARKER,
+    _APP_SUBDIRS,
+    _HARDC_DIRS,
+    _find_materialized_target,
+    _first_app_dir,
+    _is_hardc_root,
+    detect_current_config,
+    find_project_root,
+    find_target_file,
+    flatten_config_tree,
+    inject_config,
+    render_config_block,
+    scan_configs,
+    unflatten_config_tree,
+)
 
 def run_cli() -> int:
     """命令行模式：列出配置、应用配置。支持 legacy 与 HardC 双布局。"""
@@ -544,15 +168,10 @@ def _build_gui() -> int:
         serial = None
         _HAS_SERIAL = False
 
-    # 确保 yamc 目录在 sys.path 上（便于 import scaffold）
-    _yamc_dir = str(Path(__file__).resolve().parent)
-    if _yamc_dir not in sys.path:
-        sys.path.insert(0, _yamc_dir)
-
     # 共享接入流水线 (CLI 同源) + 外部工程探测
-    from engine import _LEVEL_TAG, run_pipeline
-    from project_probe import detect_platform as _probe_platform
-    from project_probe import find_project_root as _probe_root
+    from .engine import _LEVEL_TAG, run_pipeline
+    from .project_probe import detect_platform as _probe_platform
+    from .project_probe import find_project_root as _probe_root
 
     # ── 暗色主题工具 ────────────────────────────────────────
 
@@ -716,7 +335,7 @@ def _build_gui() -> int:
             root_layout.setContentsMargins(12, 12, 12, 12)
             root_layout.setSpacing(8)
 
-            # 状态栏（窗口级，三个 Tab 共享）
+            # 状态栏（窗口级，四个 Tab 共享）
             status_row = QHBoxLayout()
             self._lbl_project = QLabel("项目: (未检测)")
             self._lbl_project.setStyleSheet("font-weight: bold; font-size: 14px;")
@@ -727,26 +346,197 @@ def _build_gui() -> int:
             status_row.addWidget(self._lbl_current)
             root_layout.addLayout(status_row)
 
-            # 日志（窗口级共享，Tab 构建期间即可写入）
+            # 等价命令栏（窗口级：动作按钮点击后显示 `yamc ...` 等价命令，可复制）
+            cmd_row = QHBoxLayout()
+            cmd_row.addWidget(QLabel("等价命令:"))
+            self._cmd_edit = QLineEdit()
+            self._cmd_edit.setReadOnly(True)
+            self._cmd_edit.setPlaceholderText("点击下方动作按钮 → 显示等价 yamc 命令")
+            self._cmd_edit.setStyleSheet("font-family: Consolas, monospace;")
+            cmd_row.addWidget(self._cmd_edit, stretch=1)
+            self._btn_copy_cmd = QPushButton("📋 复制")
+            self._btn_copy_cmd.setObjectName("btn_secondary")
+            self._btn_copy_cmd.clicked.connect(self._on_copy_cmd)
+            cmd_row.addWidget(self._btn_copy_cmd)
+            root_layout.addLayout(cmd_row)
+
+            # 中央 Tab 控件（每页自带日志面板）
+            self._tabs = QTabWidget()
+            self._tab_logs: dict[int, QPlainTextEdit] = {}
+            # 兜底日志（Tab 切换前早期日志用）
             mono = QFont("Consolas" if sys.platform == "win32" else "DejaVu Sans Mono", 11)
             self._log = QPlainTextEdit()
             self._log.setReadOnly(True)
             self._log.setMaximumBlockCount(2000)
             self._log.setFont(mono)
-            self._log.setMinimumHeight(110)
-
-            # 中央 Tab 控件
-            self._tabs = QTabWidget()
-            self._build_tab_inject()
+            # 顺序: 项目识别 / 拓扑选择 / 参数注入 / 运行时调参（Tab4「工具」已并入各页动作 + CLI）
+            self._build_tab_project()
             self._build_tab_topology()
+            self._build_tab_inject()
             self._build_tab_runtime()
-            self._build_tab_tools()
+            self._tabs.currentChanged.connect(self._on_tab_changed)
             root_layout.addWidget(self._tabs, stretch=1)
 
+        def _add_tab_log(self, widget: QWidget, layout: QVBoxLayout) -> QPlainTextEdit:
+            """给 Tab 页追加自带日志面板，并登记到 _tab_logs（当前 Tab 的日志即 self._log）。
+
+            以 widget 为键登记（addTab 前后均可调用，避免 indexOf(-1) 竞态）。
+            """
             log_group = QGroupBox("日志")
             log_inner = QVBoxLayout(log_group)
-            log_inner.addWidget(self._log)
-            root_layout.addWidget(log_group)
+            log = QPlainTextEdit()
+            log.setReadOnly(True)
+            log.setMaximumBlockCount(2000)
+            log.setFont(QFont("Consolas" if sys.platform == "win32" else "DejaVu Sans Mono", 11))
+            log.setMinimumHeight(90)
+            log_inner.addWidget(log)
+            layout.addWidget(log_group)
+            self._tab_logs[widget] = log
+            return log
+
+        def _on_tab_changed(self, index: int) -> None:
+            """切 Tab → 日志面板跟随（每页自带日志）。"""
+            w = self._tabs.widget(index)
+            log = self._tab_logs.get(w)
+            if log is not None:
+                self._log = log
+
+        def _set_cmd(self, text: str) -> None:
+            """显示等价 `yamc ...` 命令（可复制）。"""
+            self._cmd_edit.setText(text)
+
+        def _on_copy_cmd(self) -> None:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.clipboard().setText(self._cmd_edit.text())
+
+        def _run_cli_in_thread(self, fn, argv: list[str]) -> None:
+            """后台线程跑 yamc.cli 命令函数，stdout 逐行进当前日志（公共层执行）。"""
+            import contextlib
+            import io
+            import threading
+
+            def _worker() -> None:
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf):
+                        fn(list(argv))
+                except SystemExit:
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    self._log_msg(f"✗ CLI 异常: {exc}")
+                for line in buf.getvalue().splitlines():
+                    if line.strip():
+                        self._log_msg(line)
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+
+        def _build_tab_project(self) -> None:
+            """Tab1「项目识别」— 自检 / 探测 / 外部接入 / Bootloader / 生成工程（动作=等价 yamc 命令）。"""
+            from yamc import cli as _cli
+
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
+
+            # 自检 + 探测
+            row1 = QHBoxLayout()
+            btn_check = QPushButton("🏥 自检 (yamc check)")
+            btn_check.clicked.connect(lambda: self._run_cli_in_thread(_cli.cmd_check, []) or self._set_cmd("yamc check"))
+            row1.addWidget(btn_check)
+            btn_probe = QPushButton("🕵 探测项目 (yamc probe)")
+            btn_probe.clicked.connect(lambda: self._run_cli_in_thread(_cli.cmd_probe, []) or self._set_cmd("yamc probe"))
+            row1.addWidget(btn_probe)
+            btn_ccs = QPushButton("🤖 stm32 重生成 (yamc cubemx_generate)")
+            btn_ccs.clicked.connect(lambda: self._on_cmd_cubemx() or self._set_cmd("yamc cubemx_generate -d <工程根>"))
+            row1.addWidget(btn_ccs)
+            row1.addStretch()
+            layout.addLayout(row1)
+
+            btn_row = QHBoxLayout()
+            self._btn_proj_gen = QPushButton("⚒ 生成工程 (yamc topo gen)")
+            self._btn_proj_gen.setToolTip("用 Tab2 当前选中拓扑生成骨架（先到 Tab2 选拓扑）")
+            self._btn_proj_gen.clicked.connect(self._on_proj_gen)
+            btn_row.addWidget(self._btn_proj_gen)
+
+            self._btn_proj_bl = QPushButton("🚀 Bootloader (yamc gen_bootloader)")
+            self._btn_proj_bl.clicked.connect(self._on_proj_bootloader)
+            btn_row.addWidget(self._btn_proj_bl)
+            btn_row.addStretch()
+            layout.addLayout(btn_row)
+
+            # 外部工程接入（yamc cfg_run 完整流水线，engine 后台线程）
+            self._build_ext_panel(layout)
+
+            layout.addStretch()
+            self._add_tab_log(widget, layout)
+            self._tabs.addTab(widget, "项目识别")
+
+        def _build_ext_panel(self, layout: QVBoxLayout) -> None:
+            """外部工程接入面板（= yamc cfg_run；由 Tab1 项目识别持有）。"""
+            ext_group = QGroupBox("外部工程接入（yamc cfg_run 完整流水线 → 真实 CubeMX/C2000 工程）")
+            ext_inner = QVBoxLayout(ext_group)
+            ext_inner.setContentsMargins(8, 12, 8, 8)
+            ext_inner.setSpacing(6)
+
+            ext_row = QHBoxLayout()
+            ext_row.addWidget(QLabel("工程根:"))
+            self._edit_ext_root = QLineEdit()
+            self._edit_ext_root.setPlaceholderText("外部工程根（含 .ioc/.syscfg），如 D:/proj/my_psu")
+            ext_row.addWidget(self._edit_ext_root, stretch=1)
+            self._btn_ext_browse = QPushButton("浏览…")
+            self._btn_ext_browse.setObjectName("btn_secondary")
+            self._btn_ext_browse.clicked.connect(self._on_ext_browse)
+            ext_row.addWidget(self._btn_ext_browse)
+            self._btn_ext_probe = QPushButton("探测")
+            self._btn_ext_probe.setObjectName("btn_secondary")
+            self._btn_ext_probe.clicked.connect(self._on_ext_probe)
+            ext_row.addWidget(self._btn_ext_probe)
+            ext_inner.addLayout(ext_row)
+
+            self._lbl_ext_probe = QLabel("未探测")
+            self._lbl_ext_probe.setStyleSheet("color: #888; font-size: 12px;")
+            ext_inner.addWidget(self._lbl_ext_probe)
+
+            opt_row = QHBoxLayout()
+            self._chk_ext_no_build = QCheckBox("跳过编译")
+            self._chk_ext_no_sub = QCheckBox("跳过 submodule (adopt 已有目录)")
+            self._chk_ext_no_sub.setChecked(True)
+            opt_row.addWidget(self._chk_ext_no_build)
+            opt_row.addWidget(self._chk_ext_no_sub)
+            opt_row.addStretch()
+            ext_inner.addLayout(opt_row)
+
+            self._btn_ext_run = QPushButton("▶ 运行完整接入")
+            self._btn_ext_run.clicked.connect(self._on_ext_run)
+            ext_inner.addWidget(self._btn_ext_run)
+            layout.addWidget(ext_group)
+
+        def _on_cmd_cubemx(self) -> None:
+            from yamc import cli as _cli
+            root = getattr(self, "_project_root", None)
+            argv = ["-d", str(root)] if root else []
+            self._run_cli_in_thread(_cli.cmd_cubemx_generate, argv)
+
+        def _on_proj_gen(self) -> None:
+            """Tab1「生成工程」→ 复用 Tab2 拓扑选择状态（= yamc topo gen <name>）。"""
+            topo = getattr(self, "_current_topo", None)
+            if topo is None:
+                self._log_msg("✗ 未选择拓扑 — 请到「拓扑选择」页先选一个（或先用探测发现项目）")
+                return
+            name = str(topo.get("name") or "project")
+            self._set_cmd(f"yamc topo gen {name} --bootloader" if getattr(self, "_chk_gen_bootloader", None) and self._chk_gen_bootloader.isChecked()
+                          else f"yamc topo gen {name}")
+            self._on_topo_generate()
+
+        def _on_proj_bootloader(self) -> None:
+            """Tab1「Bootloader」→ 独立生成 bootloader_main（= yamc gen_bootloader）。"""
+            from yamc import cli as _cli
+            topo = getattr(self, "_current_topo", None)
+            name = str(topo.get("name") or "buck") if topo else "buck"
+            self._set_cmd(f"yamc gen_bootloader -d {getattr(self, '_project_root', '.')} -t {name}")
+            self._run_cli_in_thread(_cli.cmd_gen_bootloader, ["-d", str(getattr(self, "_project_root", ".")), "-t", name])
 
         def _build_tab_inject(self) -> None:
             """Tab1「参数注入」— 页内直接改数值 + 写回 YAML，不再依赖手开 YAML。
@@ -886,6 +676,8 @@ def _build_gui() -> int:
             btn_row.addStretch()
             layout.addLayout(btn_row)
 
+            self._add_tab_log(widget, layout)
+
             widget.setLayout(layout)
             self._tabs.addTab(widget, "参数注入")
 
@@ -1023,45 +815,7 @@ def _build_gui() -> int:
             btn_row.addStretch()
             layout.addLayout(btn_row)
 
-            # ── 外部工程接入 (yamc_cfg 完整流水线, 与 CLI 同源 engine) ──
-            ext_group = QGroupBox("外部工程接入（yamc_cfg 完整流水线 → 真实 CubeMX 工程）")
-            ext_inner = QVBoxLayout(ext_group)
-            ext_inner.setContentsMargins(8, 12, 8, 8)
-            ext_inner.setSpacing(6)
-
-            ext_row = QHBoxLayout()
-            ext_row.addWidget(QLabel("工程根:"))
-            self._edit_ext_root = QLineEdit()
-            self._edit_ext_root.setPlaceholderText("外部工程根（含 .ioc），如 D:/proj/my_psu")
-            ext_row.addWidget(self._edit_ext_root, stretch=1)
-            self._btn_ext_browse = QPushButton("浏览…")
-            self._btn_ext_browse.setObjectName("btn_secondary")
-            self._btn_ext_browse.clicked.connect(self._on_ext_browse)
-            ext_row.addWidget(self._btn_ext_browse)
-            self._btn_ext_probe = QPushButton("探测")
-            self._btn_ext_probe.setObjectName("btn_secondary")
-            self._btn_ext_probe.clicked.connect(self._on_ext_probe)
-            ext_row.addWidget(self._btn_ext_probe)
-            ext_inner.addLayout(ext_row)
-
-            self._lbl_ext_probe = QLabel("未探测")
-            self._lbl_ext_probe.setStyleSheet("color: #888; font-size: 12px;")
-            ext_inner.addWidget(self._lbl_ext_probe)
-
-            opt_row = QHBoxLayout()
-            self._chk_ext_no_build = QCheckBox("跳过编译")
-            self._chk_ext_no_sub = QCheckBox("跳过 submodule (adopt 已有目录)")
-            self._chk_ext_no_sub.setChecked(True)
-            opt_row.addWidget(self._chk_ext_no_build)
-            opt_row.addWidget(self._chk_ext_no_sub)
-            opt_row.addStretch()
-            ext_inner.addLayout(opt_row)
-
-            self._btn_ext_run = QPushButton("▶ 运行完整接入")
-            self._btn_ext_run.clicked.connect(self._on_ext_run)
-            ext_inner.addWidget(self._btn_ext_run)
-
-            layout.addWidget(ext_group)
+            self._add_tab_log(widget, layout)
 
             widget.setLayout(layout)
             self._tabs.addTab(widget, "拓扑选择")
@@ -1092,6 +846,7 @@ def _build_gui() -> int:
                 tip.setStyleSheet("color: #e5b567; font-size: 14px; padding: 12px;")
                 layout.addWidget(tip)
                 layout.addStretch()
+                self._add_tab_log(widget, layout)
                 widget.setLayout(layout)
                 self._tabs.addTab(widget, "运行时调参")
                 return
@@ -1826,7 +1581,7 @@ def _build_gui() -> int:
 
             # 2. import scaffold → cmd_gen 生成骨架
             try:
-                import scaffold
+                from yamc import scaffold
             except ImportError:
                 self._log_msg("✗ 无法导入 yamc/scaffold.py")
                 QMessageBox.critical(self, "scaffold 缺失", "yamc/scaffold.py 导入失败。")
@@ -1862,7 +1617,7 @@ def _build_gui() -> int:
                 bl_map = proj_yaml.get("bootloader") or {}
                 try:
                     # flash_map_gen: 生成 bsp_flash_map.h + bootloader_flash.ld/app_flash.ld → gen_dir
-                    import flash_map_gen
+                    from yamc import flash_map_gen
                     fm_ret = flash_map_gen.cmd_gen(
                         root, root / "Config" / "flash_map.yaml",
                         bl_map.get("mcu", mcu.lower()), gen_dir)
@@ -1872,7 +1627,7 @@ def _build_gui() -> int:
                         return
                     # gen_bootloader: 物化 bootloader_main.c/h → gen_dir (复用 gen_app)
                     #   topo 覆盖为合成的 bootloader 配置 (enable:true 强制), 否则 buck 的 enable:false 会跳过填充
-                    from gen_app import gen_bootloader
+                    from yamc.gen_app import gen_bootloader
                     gbl_periph = {"platform": "stm32", "peripherals": {"hrtim": [], "adc": [], "can": []}}
                     gbl_topo = dict(topo)
                     gbl_topo["bootloader"] = bl_map

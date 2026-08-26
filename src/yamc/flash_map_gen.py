@@ -26,6 +26,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -379,7 +380,7 @@ def cmd_gen(root, map_path, mcu, out_dir):
 
 # ---- CLI ----
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
   parser = argparse.ArgumentParser(
     prog="flash_map_gen",
     description="Flash 分区真相 → bsp_flash_map.h + 两个链接脚本",
@@ -403,7 +404,7 @@ def main() -> int:
   p_gen.add_argument("--out", default=None, help="输出目录（默认 build/gen/<mcu>/）")
   _add_common(p_gen)
 
-  args = parser.parse_args()
+  args = parser.parse_args(argv)
 
   root = find_repo_root()
   if root is None:

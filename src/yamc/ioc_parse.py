@@ -24,7 +24,7 @@ from typing import Optional
 
 import yaml
 
-from project_probe import find_ioc, _read_ioc, _to_int
+from .project_probe import find_ioc, _read_ioc, _to_int
 
 # HRTIM 子定时器: Periode_TA 存在 → Timer A 被使用
 _HRTIM_TIMERS = ("A", "B", "C", "D", "E", "F")

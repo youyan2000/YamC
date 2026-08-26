@@ -555,7 +555,7 @@ def cmd_gen(root, project_yaml, out_dir):
   return 0
 
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
   """CLI 入口。"""
   parser = argparse.ArgumentParser(
     prog="scaffold",
@@ -572,7 +572,7 @@ def main() -> int:
   p_gen.add_argument("project_yaml", help="project.yaml 路径")
   p_gen.add_argument("--out", default=None, help="输出目录（默认 build/gen/<project>/）")
 
-  args = parser.parse_args()
+  args = parser.parse_args(argv)
 
   root = find_repo_root()
   if root is None:
