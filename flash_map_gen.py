@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-YmaC/flash_map_gen.py — Flash 分区真相 → bsp_flash_map.h + 两个链接脚本
+yamc/flash_map_gen.py — Flash 分区真相 → bsp_flash_map.h + 两个链接脚本
 ========================================================================
 读 Config/flash_map.yaml（分区真相）→ 生成:
   - bsp_flash_map.h       const BspFlashRegion 数组（bootloader/app/param 等地址）
   - bootloader_flash.ld     Bootloader 段链接脚本（FLASH = bootloader 分区）
   - app_flash.ld            App 段链接脚本（FLASH = app 分区）
 
-这是"YmaC 双固件生成"（阶段 6）最独立、最基础的一步，host 可测、纯函数。
+这是"yamc 双固件生成"（阶段 6）最独立、最基础的一步，host 可测、纯函数。
 
 CLI:
-  python YmaC/flash_map_gen.py list [--map <yaml>]                  # 列出全部 MCU 及分区概况
-  python YmaC/flash_map_gen.py show <mcu> [--map <yaml>]            # 展示某 MCU 的完整解析分区（校验 + 推导值）
-  python YmaC/flash_map_gen.py gen [--mcu <mcu>] [--out <dir>] [--map <yaml>]   # 生成 bsp_flash_map.h + 两个 .ld
+  python yamc/flash_map_gen.py list [--map <yaml>]                  # 列出全部 MCU 及分区概况
+  python yamc/flash_map_gen.py show <mcu> [--map <yaml>]            # 展示某 MCU 的完整解析分区（校验 + 推导值）
+  python yamc/flash_map_gen.py gen [--mcu <mcu>] [--out <dir>] [--map <yaml>]   # 生成 bsp_flash_map.h + 两个 .ld
 
   参数: --map flash_map.yaml 路径（默认 Config/flash_map.yaml，相对仓库根）
 
@@ -253,7 +253,7 @@ def _write_flash_map_h(cfg):
   target = cfg["flash_base"]
 
   lines = []
-  lines.append("// 自动生成 — Flash 分区表 (由 YmaC/flash_map_gen.py 从 Config/flash_map.yaml 生成)")
+  lines.append("// 自动生成 — Flash 分区表 (由 yamc/flash_map_gen.py 从 Config/flash_map.yaml 生成)")
   lines.append("// 文件: bsp_flash_map.h — 平台无关分区定义, 供 Bootloader / Database / 拓扑链接使用.")
   lines.append("// 不要手动编辑; 改分区真相应改 Config/flash_map.yaml 后重新生成.")
   lines.append("")
@@ -321,8 +321,8 @@ def _subst_flash(root, name, cfg, part_name, out):
     raise FlashMapError(f"MCU 缺少分区 '{part_name}'，无法生成 {name}")
   origin = pc[part_name]["addr"]
   length = pc[part_name]["size"]
-  nline = f"__FLASH_ORIGIN = 0x{origin:08X};  /* 分区 '{part_name}' · YmaC/flash_map_gen 注入 */"
-  lline = f"__FLASH_LENGTH = {length};   /* 分区 '{part_name}' · YmaC/flash_map_gen 注入 */"
+  nline = f"__FLASH_ORIGIN = 0x{origin:08X};  /* 分区 '{part_name}' · yamc/flash_map_gen 注入 */"
+  lline = f"__FLASH_LENGTH = {length};   /* 分区 '{part_name}' · yamc/flash_map_gen 注入 */"
   lines = []
   src = tpl.read_text(encoding="utf-8").splitlines()
   for ln in src:
@@ -372,7 +372,7 @@ def cmd_gen(root, map_path, mcu, out_dir):
     print(f"生成: {out / OUT_APP_LD}  (分区 'app')")
   else:
     print(f"提示: MCU '{name}' 是 C2000（TI linker 需 .cmd 而非 GNU .ld），" +
-          "链路脚本 .cmd 生成留待 YmaC 阶段 6 后续。本步未生成 .ld。")
+          "链路脚本 .cmd 生成留待 yamc 阶段 6 后续。本步未生成 .ld。")
   print(f"输出目录: {out}")
   return 0
 

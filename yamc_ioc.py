@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""ymac_ioc — 对标 xr_parse_ioc: 解析 CubeMX .ioc → 外设 YAML + 控制台摘要 (CLI).
+"""yamc_ioc — 对标 xr_parse_ioc: 解析 CubeMX .ioc → 外设 YAML + 控制台摘要 (CLI).
 
 从 STM32CubeMX .ioc 提取外设/引脚/DMA/MCU 信息, 落到 .hardc/<stem>.periph.yaml
 (或 -o 指定), 并在终端输出可读摘要 (MCU、HRTIM/ADC/UART/CAN 外设计数等)。
 
 用法:
-  ymac_ioc -d <工程根> [-o <out.yaml>] [--verbose]
+  yamc_ioc -d <工程根> [-o <out.yaml>] [--verbose]
 
 等价 libxr:
   xr_parse_ioc -d DIRECTORY [-o OUTPUT] [--verbose]
@@ -38,7 +38,7 @@ def _summary(periph: dict) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="ymac_ioc", description="解析 CubeMX .ioc → 外设 YAML + 摘要")
+    ap = argparse.ArgumentParser(prog="yamc_ioc", description="解析 CubeMX .ioc → 外设 YAML + 摘要")
     ap.add_argument("-d", "--directory", default=".", help=".ioc 所在工程根")
     ap.add_argument("-o", "--output", default=None, help="输出 YAML 路径 (默认 .hardc/<stem>.periph.yaml)")
     ap.add_argument("--verbose", action="store_true", help="详细日志")

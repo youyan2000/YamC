@@ -19,8 +19,8 @@ YAML Config Builder — 通用 YAML → C 代码配置注入工具
 依赖：pip install PyQt6 pyyaml darkdetect
 
 用法：
-    python YmaC/yaml_config_builder.py          # 启动 GUI
-    python YmaC/yaml_config_builder.py --cli    # 命令行模式（列出配置）
+    python yamc/yaml_config_builder.py          # 启动 GUI
+    python yamc/yaml_config_builder.py --cli    # 命令行模式（列出配置）
 """
 
 from __future__ import annotations
@@ -544,10 +544,10 @@ def _build_gui() -> int:
         serial = None
         _HAS_SERIAL = False
 
-    # 确保 YmaC 目录在 sys.path 上（便于 import scaffold）
-    _ymac_dir = str(Path(__file__).resolve().parent)
-    if _ymac_dir not in sys.path:
-        sys.path.insert(0, _ymac_dir)
+    # 确保 yamc 目录在 sys.path 上（便于 import scaffold）
+    _yamc_dir = str(Path(__file__).resolve().parent)
+    if _yamc_dir not in sys.path:
+        sys.path.insert(0, _yamc_dir)
 
     # 共享接入流水线 (CLI 同源) + 外部工程探测
     from engine import _LEVEL_TAG, run_pipeline
@@ -1023,8 +1023,8 @@ def _build_gui() -> int:
             btn_row.addStretch()
             layout.addLayout(btn_row)
 
-            # ── 外部工程接入 (ymac_cfg 完整流水线, 与 CLI 同源 engine) ──
-            ext_group = QGroupBox("外部工程接入（ymac_cfg 完整流水线 → 真实 CubeMX 工程）")
+            # ── 外部工程接入 (yamc_cfg 完整流水线, 与 CLI 同源 engine) ──
+            ext_group = QGroupBox("外部工程接入（yamc_cfg 完整流水线 → 真实 CubeMX 工程）")
             ext_inner = QVBoxLayout(ext_group)
             ext_inner.setContentsMargins(8, 12, 8, 8)
             ext_inner.setSpacing(6)
@@ -1157,7 +1157,7 @@ def _build_gui() -> int:
 
         # ═══════════════════════════════════════════════════════════
         #  Tab4「工具（CLI 等价）」— GUI ≅ CLI 功能对齐
-        #  直接以子进程调用 YmaC 各 CLI 脚本 (scaffold / flash_map_gen /
+        #  直接以子进程调用 yamc 各 CLI 脚本 (scaffold / flash_map_gen /
         #  merge_firmware) 的 main(), 与终端行为完全一致, 输出进共享日志.
         # ═══════════════════════════════════════════════════════════
 
@@ -1263,7 +1263,7 @@ def _build_gui() -> int:
             return os.getcwd()
 
         def _run_cli_tool(self, argv: list[str]) -> None:
-            """以子进程运行 YmaC 脚本并回显输出到共享日志 (与 CLI 同源)."""
+            """以子进程运行 yamc 脚本并回显输出到共享日志 (与 CLI 同源)."""
             cwd = self._tools_cwd()
             script = Path(__file__).resolve().parent / argv[0]
             if not script.is_file():
@@ -1828,8 +1828,8 @@ def _build_gui() -> int:
             try:
                 import scaffold
             except ImportError:
-                self._log_msg("✗ 无法导入 YmaC/scaffold.py")
-                QMessageBox.critical(self, "scaffold 缺失", "YmaC/scaffold.py 导入失败。")
+                self._log_msg("✗ 无法导入 yamc/scaffold.py")
+                QMessageBox.critical(self, "scaffold 缺失", "yamc/scaffold.py 导入失败。")
                 return
             try:
                 ret = scaffold.cmd_gen(root, proj_path.relative_to(root).as_posix(), None)

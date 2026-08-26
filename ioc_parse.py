@@ -1,4 +1,4 @@
-"""ymac_cfg — STM32CubeMX .ioc → 外设 YAML (缓存 .hardc/periph.yaml).
+"""yamc_cfg — STM32CubeMX .ioc → 外设 YAML (缓存 .hardc/periph.yaml).
 
 对标 xr_cubemx_cfg 的 .ioc 解析: 提取 HRTIM/ADC/UART/CAN 实例 + DMA + 引脚映射,
 供 gen_app.py 生成带完整外设绑定的 app_main.c/h.

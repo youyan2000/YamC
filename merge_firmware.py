@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-YmaC/merge_firmware.py — 合并 bootloader.hex + app.hex 为单一 .hex
+yamc/merge_firmware.py — 合并 bootloader.hex + app.hex 为单一 .hex
 =================================================================
-阶段 6（YmaC 双固件）步骤 2：把两个（或多个）独立 Intel HEX 固件
+阶段 6（yamc 双固件）步骤 2：把两个（或多个）独立 Intel HEX 固件
 映像按地址拼接合并成**一个**烧录映像。Bootloader 段 + App 段 + 参数区
 各自来自不同 .elf 生成的 .hex，地址不重叠，合并后一次烧录整片 Flash。
 
@@ -11,10 +11,10 @@ YmaC/merge_firmware.py — 合并 bootloader.hex + app.hex 为单一 .hex
 host 可测。
 
 CLI:
-  python YmaC/merge_firmware.py merge -o merged.hex boot.hex app.hex
-  python YmaC/merge_firmware.py merge --overlap over -o merged.hex app.hex param.hex
-  python YmaC/merge_firmware.py info boot.hex
-  python YmaC/merge_firmware.py selftest
+  python yamc/merge_firmware.py merge -o merged.hex boot.hex app.hex
+  python yamc/merge_firmware.py merge --overlap over -o merged.hex app.hex param.hex
+  python yamc/merge_firmware.py info boot.hex
+  python yamc/merge_firmware.py selftest
 
 仅依赖 Python 标准库。
 """

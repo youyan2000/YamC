@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""ymac_cfg — 对标 xr_cubemx_cfg 的 HardC 接入工具链 (CLI).
+"""yamc_cfg — 对标 xr_cubemx_cfg 的 HardC 接入工具链 (CLI).
 
 在 STM32CubeMX / C2000 工程根执行一条命令, 编排逻辑见 engine.run_pipeline:
   1. 探测平台 (.ioc=stm32 / main.syscfg=c2000)
   2. HardC git submodule 接入 (或 --no-submodule adopt 已有目录)
   3. 解析 .ioc → 外设 YAML (.hardc/periph.yaml)
   4. 拓扑 + 外设 → 生成 app_main.c/h (完整外设绑定)
-  5. CMakeLists.txt 幂等集成 (YmaC HardC BEGIN/END 块)
+  5. CMakeLists.txt 幂等集成 (yamc HardC BEGIN/END 块)
   6. 编译 (除非 --no-build)
 
 用法:
-  ymac_cfg -d <工程根> --topology buck [--git-source <repo-url>]
-  ymac_cfg -d <工程根> --topology buck --no-submodule --no-build
+  yamc_cfg -d <工程根> --topology buck [--git-source <repo-url>]
+  yamc_cfg -d <工程根> --topology buck --no-submodule --no-build
 
 退出码: 0=全部 [Pass]; 1=任一 [FAIL]; 2=平台/参数不支持.
 GUI (yaml_config_builder.py Tab2) 与 CLI 共用 engine.run_pipeline.

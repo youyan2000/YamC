@@ -1,4 +1,4 @@
-"""ymac_cfg — TI SysConfig main.syscfg → C2000 外设 YAML (缓存 .hardc/periph.yaml).
+"""yamc_cfg — TI SysConfig main.syscfg → C2000 外设 YAML (缓存 .hardc/periph.yaml).
 
 对标 xr_cubemx_cfg 的 .ioc 解析: 提取 ePWM/ADC/CLA 实例 + SYSCLK + SysConfig 产物
 目录, 供 gen_app.py 生成 C2000 版 app_main.c/h.

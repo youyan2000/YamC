@@ -1,10 +1,10 @@
-"""ymac_cfg — CLI/GUI 共享接入流水线 (纯编排, 无 GUI 依赖).
+"""yamc_cfg — CLI/GUI 共享接入流水线 (纯编排, 无 GUI 依赖).
 
 对标 xr_cubemx_cfg: 一条流水线在外部工程根完成
   探测平台 → HardC submodule 接入 → .ioc 解析 → 生成 app_main.c/h
   → CMake 幂等集成 → 构建.
 
-CLI (ymac_cfg.py) 与 GUI (yaml_config_builder.py Tab2) 共用本模块;
+CLI (yamc_cfg.py) 与 GUI (yaml_config_builder.py Tab2) 共用本模块;
 慢操作 (submodule/git/构建) 由 GUI 侧放 QThread, engine 只编排 + 日志回调.
 失败不 raise 不 sys.exit, 返回 {ok, reason, exit_code} 由调用方呈现.
 
@@ -93,17 +93,21 @@ def ensure_hardc_dir(root: Path, log: LogFn, no_submodule: bool = False,
             if not (hardc / "cmake" / "HardC.CMake").is_file():
                 raise PipelineError(f"--no-submodule 但 {hardc} 不是 HardC (缺 cmake/HardC.CMake)")
             return hardc
-        # 未显式给 --hardc-path: 先试工程内 Middlewares 路径, 再默认 adopt 工具链自身仓库
-        # (工具链随库: YmaC/ 的上两级 = HardC 根). 守卫校验 HardC.CMake 存在.
+        # 拆分后: yamc 独立仓库不含 cmake/HardC.CMake, 显式定位库根:
+        #   HARDC_LIB_DIR env → 同级 ../hardc → 工程内 submodule
+        import os as _os
+        env_lib = _os.environ.get("HARDC_LIB_DIR")
+        if env_lib and (Path(env_lib) / "cmake" / "HardC.CMake").is_file():
+            log("info", f"HARDC 库根 (env HARDC_LIB_DIR): {env_lib}")
+            return Path(env_lib).resolve()
+        sibling = Path(__file__).resolve().parent.parent / "hardc"
+        if (sibling / "cmake" / "HardC.CMake").is_file():
+            log("info", f"HARDC 库根 (同级 ../hardc): {sibling}")
+            return sibling.resolve()
         hardc = (root / DEFAULT_HARDC_REL).resolve()
-        if not (hardc / "cmake" / "HardC.CMake").is_file():
-            toolchain_root = Path(__file__).resolve().parent.parent
-            if (toolchain_root / "cmake" / "HardC.CMake").is_file():
-                log("warn", f"{hardc} 不是 HardC, 改用工具链自身仓库 {toolchain_root}")
-                hardc = toolchain_root
-            else:
-                raise PipelineError(f"--no-submodule 但 {hardc} 不是 HardC (缺 cmake/HardC.CMake)")
-        return hardc
+        if (hardc / "cmake" / "HardC.CMake").is_file():
+            return hardc.resolve()
+        raise PipelineError("--no-submodule 但找不到 hardc 库根: 设 HARDC_LIB_DIR 或 --hardc-path")
 
     hardc = root / DEFAULT_HARDC_REL
     gmodules = root / ".gitmodules"

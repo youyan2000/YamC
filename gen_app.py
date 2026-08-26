@@ -1,4 +1,4 @@
-"""ymac_cfg — app_main.c/h 生成器 (拓扑 + .ioc 外设 → 物化模板 + BSP 绑定注入).
+"""yamc_cfg — app_main.c/h 生成器 (拓扑 + .ioc 外设 → 物化模板 + BSP 绑定注入).
 
 对标 xr_cubemx_cfg: 根据拓扑 YAML 与 .ioc 解析出的外设, 在外部工程生成
 带完整外设绑定的 app_main.c/h:
@@ -126,7 +126,7 @@ def gen_bsp_block(topo: dict, periph: dict) -> str:
     if periph.get("platform") == "c2000":
         return gen_bsp_block_c2000(topo, periph)
     lines: list[str] = []
-    lines.append("// ===== YmaC 生成: BSP/外设绑定 (拓扑 + .ioc) ====")
+    lines.append("// ===== yamc 生成: BSP/外设绑定 (拓扑 + .ioc) ====")
     pwm_cfg = topo.get("pwm") or {}
     gen_fn = _PWM_DEVICE_GEN.get(pwm_cfg.get("device"))
     if gen_fn:
@@ -439,7 +439,7 @@ def _gen_mod_supercap(topo: dict) -> tuple[str, str, str]:
                    f"(control_module: {topo.get('control_module')})")
     adc = topo.get("adc") or {}
     h_root = (
-        f"// ==== 由 ymac_cfg 生成: 电源域根成员 (拓扑={name}) ====\n"
+        f"// ==== 由 yamc_cfg 生成: 电源域根成员 (拓扑={name}) ====\n"
         f"// --- Power-OOP: 电力电子设备 ---\n"
         f"PwmBuckBoost drv_buck_pwm;  // 三相并联 Buck/Boost PWM (pwm_buckboost.h)\n"
         f"AdcDcSampler drv_dc_adc;    // 直流采样器 (adc_dc_sampler.h, {adc.get('num_ch', '?')} 通道)\n"
@@ -465,7 +465,7 @@ def gen_bsp_block_c2000(topo: dict, periph: dict) -> str:
     (ePWM 触发单转换源), 时钟来自 c2000_syscfg 的 mcu.sysclk_hz.
     """
     lines: list[str] = []
-    lines.append("// ===== YmaC 生成: BSP/外设绑定 (拓扑 + main.syscfg, C2000 driverlib) ====")
+    lines.append("// ===== yamc 生成: BSP/外设绑定 (拓扑 + main.syscfg, C2000 driverlib) ====")
     pwm_cfg = topo.get("pwm") or {}
     if pwm_cfg.get("device") != "pwm_buckboost":
         lines.append(f"// WARN: C2000 分支仅支持 pwm_buckboost, 跳过 {pwm_cfg.get('device')}")
@@ -607,7 +607,7 @@ def _inject_handle_externs(text: str, handles: list[tuple[str, str]]) -> str:
     for line in lines:
         out.append(line)
         if not inserted and line.strip().startswith('#include "main.h"'):
-            out.append("// YmaC: HAL 句柄 extern (CubeMX 在 main.c 定义, main.h 不导出)\n")
+            out.append("// yamc: HAL 句柄 extern (CubeMX 在 main.c 定义, main.h 不导出)\n")
             for name, ctype in handles:
                 out.append(f"extern {ctype} {name};\n")
             inserted = True
@@ -639,10 +639,10 @@ def inject_bsp_block(out_c: Path, block: str) -> bool:
 
 # ======== Bootloader 物化 (步骤 3) ========
 
-# Bootloader 模板里的 YmaC 锚点
+# Bootloader 模板里的 yamc 锚点
 BL_CFG_BEGIN = "/* YMAC BOOTLOADER_CFG BEGIN */"
 BL_CFG_END = "/* YMAC BOOTLOADER_CFG END */"
-# 生成的 bsp_flash_map.h (由 YmaC/flash_map_gen.py 从 flash_map.yaml 生成)
+# 生成的 bsp_flash_map.h (由 yamc/flash_map_gen.py 从 flash_map.yaml 生成)
 BL_FLASH_MAP_H = "bsp_flash_map.h"
 
 
@@ -657,7 +657,7 @@ def _bootloader_cfg_block(boot_cfg: dict) -> str:
   app_max_expr = boot_cfg.get("app_max_size", "BSP_FLASH_APP_SIZE")
   up_port = str(boot_cfg.get("up_port") or "uart")
   lines = [
-    "// YmaC 注入: mod_bootloader 默认配置 (app 分区来自 bsp_flash_map.h, 与 app_flash.ld 同源)",
+    "// yamc 注入: mod_bootloader 默认配置 (app 分区来自 bsp_flash_map.h, 与 app_flash.ld 同源)",
     f"  bl_cfg.app_addr = {app_addr_expr};",
     f"  bl_cfg.app_max_size = {app_max_expr};",
     f"  bl_cfg.rx_ring_size = 256u;  // 升级传输 '{up_port}'",
@@ -673,7 +673,7 @@ def _inject_boot_map_include(text: str) -> str:
   for line in lines:
     out.append(line)
     if not inserted and line.strip().startswith('#include "bootloader_main.h"'):
-      out.append(f'#include "{BL_FLASH_MAP_H}"  // Flash 分区宏 (YmaC/flash_map_gen.py)\n')
+      out.append(f'#include "{BL_FLASH_MAP_H}"  // Flash 分区宏 (yamc/flash_map_gen.py)\n')
       inserted = True
   return "".join(out)
 

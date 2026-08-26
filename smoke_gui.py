@@ -22,7 +22,7 @@ results: dict = {}
 def _driver(win) -> None:
     try:
         # 1. 工程根 + 探测
-        win._edit_ext_root.setText(r"f:/My_Projects/_ymac_test/software_clean")
+        win._edit_ext_root.setText(r"f:/My_Projects/_yamc_test/software_clean")
         win._on_ext_probe()
         results["probe"] = win._lbl_ext_probe.text()
         assert "平台" in results["probe"], f"探测失败: {results['probe']}"

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-YmaC/scaffold.py — 项目脚手架生成工具
+yamc/scaffold.py — 项目脚手架生成工具
 ======================================
 模仿 bsp-dev-c / xrobot 的 xrobot_gen_main 流程：
 读 project.yaml → 解析 MANIFEST 依赖 → 生成 CMakeLists.txt + 依赖汇总头 + board_init 骨架。
 
 CLI：
-  python YmaC/scaffold.py scan                  # 扫描仓库全部 MANIFEST 并校验
-  python YmaC/scaffold.py deps <module_id>      # 递归解析模块依赖
-  python YmaC/scaffold.py gen <project.yaml> [--out <dir>]  # 生成项目骨架
+  python yamc/scaffold.py scan                  # 扫描仓库全部 MANIFEST 并校验
+  python yamc/scaffold.py deps <module_id>      # 递归解析模块依赖
+  python yamc/scaffold.py gen <project.yaml> [--out <dir>]  # 生成项目骨架
 
 仅依赖 Python 标准库 + pyyaml。
 """
@@ -354,7 +354,7 @@ def _render_cmake(root, out, project, mcu, sources, include_dirs, boot_cfg, n_mo
   链接脚本与 bsp_flash_map.h 由 flash_map_gen.py 生成到同一 out 目录 (build/gen/<project>/).
   """
   lines = []
-  lines.append("# 自动生成 — 不要手动编辑（由 YmaC/scaffold.py gen 生成）")
+  lines.append("# 自动生成 — 不要手动编辑（由 yamc/scaffold.py gen 生成）")
   lines.append(f"# 项目: {project}")
   if mcu:
     lines.append(f"# MCU:  {mcu}")
@@ -441,7 +441,7 @@ def _render_cmake(root, out, project, mcu, sources, include_dirs, boot_cfg, n_mo
   lines.append("# 合并两固件为单一烧录映像 (bootloader + app → one .hex)")
   lines.append(f"add_custom_target({project}_merge_firmware ALL")
   lines.append(f"  COMMAND ${{Python_EXECUTABLE}} "
-               f"{(root / 'YmaC' / 'merge_firmware.py').as_posix()} merge")
+               f"{(root / 'yamc' / 'merge_firmware.py').as_posix()} merge")
   lines.append(f"    -o ${{CMAKE_CURRENT_BINARY_DIR}}/{project}_merged.hex")
   lines.append(f"    ${{CMAKE_CURRENT_BINARY_DIR}}/bootloader.hex")
   lines.append(f"    ${{CMAKE_CURRENT_BINARY_DIR}}/app.hex")

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""ymac_switch — 对标 xr_stm32_toolchain_switch 的 STM32 工具链切换命令.
+"""yamc_switch — 对标 xr_stm32_toolchain_switch 的 STM32 工具链切换命令.
 
 在 STM32CubeMX CMake 工程根执行, 切换 CMakePresets.json default preset 的
 toolchainFile (starm-clang.cmake <-> gcc-arm-none-eabi.cmake); clang 时再
 patch cmake/starm-clang.cmake 的 STARM_TOOLCHAIN_CONFIG (标准库选择).
 
 用法:
-  ymac_switch -d <工程根> gcc
-  ymac_switch -d <工程根> clang -g           # hybrid (GNU libc)
-  ymac_switch -d <工程根> clang --newlib
-  ymac_switch -d <工程根> clang --picolibc
+  yamc_switch -d <工程根> gcc
+  yamc_switch -d <工程根> clang -g           # hybrid (GNU libc)
+  yamc_switch -d <工程根> clang --newlib
+  yamc_switch -d <工程根> clang --picolibc
 
 对标 xr_stm32_toolchain_switch: patch CubeMX 自己的 CMakePresets.json,
-不造平行构建. 缺文件/非法参数 → [FAIL] + exit 1 (与 ymac_cfg 退出码契约一致).
+不造平行构建. 缺文件/非法参数 → [FAIL] + exit 1 (与 yamc_cfg 退出码契约一致).
 幂等: 已是最新则无改动且 exit 0. 重启 VSCode (CMake Presets 缓存) 后生效.
 """
 

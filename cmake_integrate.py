@@ -1,7 +1,7 @@
-"""ymac_cfg — 外部工程 CMakeLists.txt 幂等接入 HardC.CMake.
+"""yamc_cfg — 外部工程 CMakeLists.txt 幂等接入 HardC.CMake.
 
 对标 xr_cubemx_cfg 的构建集成: 往外部工程 CMakeLists.txt 注入一个
-`YmaC HardC BEGIN/END` 块 (set HARDC_* 变量 + include + target_sources + link),
+`yamc HardC BEGIN/END` 块 (set HARDC_* 变量 + include + target_sources + link),
 删除旧块重跑即可重建; 不改动 CubeMX 保护区.
 
 注入位置: 首个 add_subdirectory 之后 (HardC.CMake 需 stm32cubemx 目标已定义),
@@ -24,15 +24,15 @@ import re
 from pathlib import Path
 from typing import Optional
 
-BEGIN_MARKER = "# ====== YmaC HardC BEGIN (ymac_cfg 生成, 勿手改) ======"
-END_MARKER = "# ====== YmaC HardC END ======"
+BEGIN_MARKER = "# ====== yamc HardC BEGIN (yamc_cfg 生成, 勿手改) ======"
+END_MARKER = "# ====== yamc HardC END ======"
 
 # 旧版手工集成 (User/Components... 平铺) 的检测特征
 _OLD_USER_PATTERN = re.compile(r"User/(Components|Devices|Module)/")
 
 
 def _has_old_integration(text: str) -> bool:
-    """检测 YmaC 块之外的旧版 User/Components... 手工集成.
+    """检测 yamc 块之外的旧版 User/Components... 手工集成.
 
     先剔除注入块, 避免块内 target_sources(... User/Application/app_main.c) 误命中.
     """
